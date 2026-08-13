@@ -465,15 +465,22 @@ OpenTelemetry / Cloud Trace は Phase 5 の発展課題。単一サービスな�
 
 ### CI/CD: GitHub Actions + Workload Identity Federation
 
+**検査は PR、デプロイは main** の 2 系統に分ける。
+
 ```
-push to main
+pull_request
   ├─ backend/** が変更 → go test ./... / golangci-lint
-  ├─ web/**     が変更 → tsc --noEmit / vitest
+  └─ web/**     が変更 → tsc --noEmit / vitest
+
+push to main
   ├─ docker build → Artifact Registry へ push
   ├─ golang-migrate で Neon にマイグレーション適用
   ├─ gcloud run deploy（新リビジョン）
   └─ web/ をビルドして Firebase Hosting へデプロイ
 ```
+
+検査を `push to main` だけに置くと、マージした後に初めてテストの失敗に気づくことになり、
+PR をレビュー単位・CI 単位として使う意味が消える。開発フローは `CONTRIBUTING.md` を参照。
 
 **サービスアカウントキー（JSON）を使わない理由**
 
@@ -565,7 +572,7 @@ GCP プロジェクト作成、課金紐付け、API 有効化、Artifact Regist
 
 | Phase | 内容 | 主な学び | 完了条件 |
 |---|---|---|---|
-| **0** | Hello World を Cloud Run へ | GCP 一式、Terraform、Dockerfile、WIF | 公開 URL が JSON を返す |
+| **0** | Hello World を Cloud Run へ | GCP 一式、Terraform、Dockerfile、WIF、Go の土台 | 公開 URL が JSON を返す |
 | **1** | メモリ実装の TODO CRUD | Go の書き方、パッケージ分割、TDD、手書き fake | 全 CRUD が動き、テストが緑 |
 | **2** | Postgres 永続化 | pgx 手書き → sqlc、migrate、testcontainers | 再起動してもデータが残る |
 | **3** | Firebase 認証 | ミドルウェア、`context` 伝搬、所有権チェック | 他人の TODO が見えない |
@@ -573,6 +580,17 @@ GCP プロジェクト作成、課金紐付け、API 有効化、Artifact Regist
 | **5** | 発展 | Cloud Run Jobs、oapi-codegen、OTel、Cloud SQL 体験 | — |
 
 **各 Phase の終わりで必ずデプロイして動作確認する。**
+
+### Phase 0 に含める「Go の土台」
+
+Phase 0 はインフラだけではない。以下も Phase 0 で作り切る。
+
+- `backend/go.mod`（`go mod init`）と `docs/DESIGN.md` 3 章のディレクトリ構成
+- `Makefile`（`make dev` / `test` / `lint` の入口）
+- `cmd/api/main.go`、`/healthz` ハンドラ、グレースフルシャットダウン
+
+こうしておくと Phase 1 の最初の issue が「土台 + 最初のエンドポイント」で肥大化せず、
+Phase 1 の 4 本（GET / POST / PATCH / DELETE）がすべて同じ大きさに揃う。
 
 ### Phase 1 で DB を使わない理由
 
@@ -618,8 +636,10 @@ Phase 2 で `postgres` 実装に差し替えたとき、**`todo` パッケージ
 
 ### 着手時に決めること
 
-- Go のバージョン（最新安定版に合わせる）
-- Neon のリージョン（東京に近いものを選ぶ）
-- GCP プロジェクトを新規作成するか既存を使うか
-- `golangci-lint` の設定内容
-- Docker ランタイム（colima を想定）
+| 項目 | 決定 |
+|---|---|
+| GCP プロジェクト | **新規作成する** |
+| `golangci-lint` | **既定のまま**始める。必要を感じてから絞る |
+| Docker ランタイム | colima |
+| Neon のリージョン | 東京に最も近いもの |
+| Go のバージョン | 着手時の最新安定版 |
