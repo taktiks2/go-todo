@@ -92,7 +92,8 @@ go-todo/
 │   └── src/                      # Vite + React + TanStack Query
 ├── infra/                        # Terraform
 ├── scripts/
-│   ├── bootstrap.sh              # Terraform state 用 GCS バケット作成（手動実行）
+│   ├── bootstrap.sh              # GCP プロジェクト / API / state バケット / 予算（手動実行）
+│   ├── tfstate-lifecycle.json    # state バケットの lifecycle rule
 │   └── setup-firebase.sh         # Firebase 側の手動設定を記録
 ├── .github/workflows/
 └── Makefile                      # make dev / test / migrate / gen の入口
@@ -463,6 +464,23 @@ OpenTelemetry / Cloud Trace は Phase 5 の発展課題。単一サービスな�
 - **Firebase 関連（Auth 有効化、Hosting）は Terraform の管理外**とする。`google-beta` に一部リソースはあるが、Hosting のデプロイ自体は CLI。**全部 Terraform でやろうとしない**
 - **Cloud Run の `image` は `lifecycle { ignore_changes }` で除外する**。イメージ更新は CD の責務。「**インフラの形は Terraform、動くバージョンは CD**」という責務分割。実務で必ず踏む論点
 
+#### 決定値（#1 で確定）
+
+| 項目 | 値 |
+|---|---|
+| `PROJECT_ID` | `taktiks2-go-todo`（GCP の仕様上あとから変更できない） |
+| state バケット | `gs://taktiks2-go-todo-tfstate` |
+| バケットの location | `us-central1` |
+| 有効化した API | `cloudresourcemanager` / `serviceusage` / `storage` / `iam` / `iamcredentials` / `sts` / `run` / `artifactregistry` / `secretmanager` / `cloudbilling` / `billingbudgets` |
+
+**state バケットだけ `us-central1` に置く。** Cloud Storage の Always Free は US リージョン（`us-east1` / `us-west1` / `us-central1`）限定で `asia-northeast1` は対象外。state バケットは Cloud Run から一切触られず、触るのはローカルの `terraform` と GitHub Actions（US ランナー）だけなので、東京に置く理由が無い。Cloud Run 自身は `asia-northeast1` のまま。
+
+**バケットの soft delete は既定の 7 日のまま残す。** 当初は「Object Versioning と役割が重複する」として無効化したが、これは誤りだった。versioning が守るのは「上書き」と「現行世代の削除」だけで、`rm --all-versions` やバケットごと消す操作からは守れない。soft delete はそこを埋める別のレイヤで、state を吹き飛ばしたときの最後の復旧手段になる。state は数十 KB で Always Free の 5 GB 枠に収まるため、保持コストはゼロに丸まる。旧世代の刈り取りは lifecycle rule が別途担当する（非現行かつ新しい世代が 5 つ以上あり、非現行になって 30 日経ったものを削除）。
+
+**予算アラートをプロジェクト単位で張っている。** 課金アカウントの通貨は USD で、予算額は $1、閾値は 10% / 50% / 100%。$0.10 の支出で最初の通知が飛ぶ。無料枠を外れたことに気づくのが目的で、**アラートは支出を止めない**。課金アカウント全体には既存の $20 予算が別途あり、そちらが最後の砦になる。
+
+手順は `scripts/bootstrap.sh` にある。**このスクリプトは冪等ではない。** 一度きりの記録として読む。
+
 ### CI/CD: GitHub Actions + Workload Identity Federation
 
 **検査は PR、デプロイは main** の 2 系統に分ける。
@@ -633,12 +651,16 @@ Phase 2 で `postgres` 実装に差し替えたとき、**`todo` パッケージ
 - **Neon はクロスクラウド**。Cloud Run（GCP asia-northeast1）から Neon（AWS）へは数〜数十 ms のレイテンシが乗る。学習用途では無視できるが、**「本番なら Cloud SQL を選ぶ理由」がここにある**と理解しておく。Phase 5 で Cloud SQL を一度試す
 - **Terraform 先行の学習負荷**。Go ほぼ未経験との組み合わせで負荷が高い。Phase 0 のインフラを書き切ったら**しばらく触らない**と決めて Go に戻る
 - **Phase 0 が最難関**。Go が 1 行も出てこない。ここを「アプリ開発の前の関門」と割り切れるかが完走の分かれ目
+- **Artifact Registry の無料枠は 0.5 GB/月**。distroless イメージ約 20 MB × デプロイ回数で、30〜40 回のデプロイで超える。超過は $0.10/GB/月 なので額は小さいが、#5 でリポジトリを作るときに cleanup policy を入れる
+- **Cloud Run の無料枠にリージョン制限があるか未確認**。公式の Free Tier ページは Cloud Storage にだけ「US リージョンのみ」と明記し、Cloud Run には書いていないが、二次情報は US 3 リージョン限定と主張している。**#5 でリージョンを確定する前に公式ページで確認する。** US 限定なら `asia-northeast1` 前提そのものを見直すことになる
 
 ### 着手時に決めること
 
 | 項目 | 決定 |
 |---|---|
 | GCP プロジェクト | **新規作成する** |
+| GCP プロジェクト ID | `taktiks2-go-todo`（#1 で確定。変更不可） |
+| state バケットの location | `us-central1`（無料枠が US 限定のため Cloud Run と分ける） |
 | `golangci-lint` | **既定のまま**始める。必要を感じてから絞る |
 | Docker ランタイム | colima |
 | Neon のリージョン | 東京に最も近いもの |
