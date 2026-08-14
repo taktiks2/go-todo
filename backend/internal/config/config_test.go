@@ -36,7 +36,9 @@ func TestLoad(t *testing.T) {
 			// テスト終了時に巻き戻る。
 			t.Setenv("PORT", tt.port)
 			if tt.unsetEnv {
-				os.Unsetenv("PORT")
+				if err := os.Unsetenv("PORT"); err != nil {
+					t.Fatalf("PORT を未設定にできない: %v", err)
+				}
 			}
 
 			got, err := config.Load()
