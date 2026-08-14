@@ -150,17 +150,19 @@ Expected: `go version go1.26.5 …` / `golangci-lint has version 2.12.x` / `just
 Run: `cd backend && go mod init github.com/taktiks2/go-todo/backend`
 Expected: `go: creating new go.mod: module github.com/taktiks2/go-todo/backend`
 
-- [ ] **Step 5: go directive を 1.26.0 に上げる**
+- [ ] **Step 5: go directive を 1.26.0 に揃える**
 
-`backend/go.mod` は次の内容になっているはず（`go mod init` は N-1 を書く）:
+`go mod init` は**走らせた toolchain のパッチ番号まで**書く（実測: `go 1.26.5`）。
+Go 1.26 の Release Notes には「N-1 の `go 1.25.0` を書く」とあるが、この環境の実挙動は違った。
 
 ```
 module github.com/taktiks2/go-todo/backend
 
-go 1.25.0
+go 1.26.5
 ```
 
-`go 1.25.0` を `go 1.26.0` に書き換えて、最終的にこうする:
+パッチまで固定すると Dockerfile の `golang:1.26`（#4）より狭い要求になり、
+イメージ側のパッチが古いだけでビルドが落ちる。`go 1.26.0` に書き換えて最終的にこうする:
 
 ```
 module github.com/taktiks2/go-todo/backend
@@ -227,17 +229,40 @@ result
 
 - [ ] **Step 9: 計器が動くことを確認する**
 
+**この時点では `just test` も `just lint` も終了コードは 0 にならない。** Go ファイルが 1 つも
+存在しないため。緑になるのは Task 2 の GREEN からで、それが正常。ここで確認するのは
+「終了コード」ではなく**「正しいディレクトリで、正しいツールが起動したか」**。
+
 Run: `just test`
-Expected: `no test files` が並んで終了コード 0（テストが 0 件でも成功する）
+Expected（実測）:
+
+```
+go test ./...
+go: warning: "./..." matched no packages
+no packages to test
+error: recipe `test` failed on line 15 with exit code 1
+```
+
+**この出力が `go.mod file not found` ではないことが確認事項。** `matched no packages` は
+`backend/` の `go.mod` を読めている証拠であり、`[working-directory('backend')]` が効いている。
 
 Run: `just lint`
-Expected: 何も出力せず終了コード 0
+Expected（実測）:
+
+```
+golangci-lint run
+level=error msg="Running error: context loading failed: no go files to analyze: running `go mod tidy` may solve the problem"
+error: recipe `lint` failed on line 19 with exit code 5
+```
+
+**`version: "2"` の設定が読めていない場合はここが別のエラーになる**（設定形式に関する
+メッセージが出る）。`no go files to analyze` なら設定は通っている。
+
+Run: `just fmt`
+Expected: 終了コード 0（対象ファイルが無いので何もせず成功する）
 
 Run: `just`
-Expected: `dev` / `fmt` / `lint` / `test` のレシピ一覧
-
-**`just lint` がここで赤い場合、それは lint 設定の問題であってコードの問題ではない。**
-`.golangci.yml` の `version: "2"` が抜けていないか確認する。
+Expected: `default` / `dev` / `fmt` / `lint` / `test` のレシピ一覧
 
 - [ ] **Step 10: コミットする**
 

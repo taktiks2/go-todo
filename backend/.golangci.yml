@@ -1,0 +1,13 @@
+version: "2"
+
+linters:
+  # standard = errcheck / govet / ineffassign / staticcheck / unused。
+  # docs/DESIGN.md §14「既定のまま始める。必要を感じてから絞る」に従う。
+  default: standard
+
+formatters:
+  # v2 でフォーマッタは linters から分離された。ここで有効にしないと
+  # `golangci-lint fmt` は何もしない。
+  enable:
+    - gofmt
+    - goimports
