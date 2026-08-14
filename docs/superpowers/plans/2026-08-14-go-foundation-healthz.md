@@ -74,7 +74,7 @@
 「RED を**実行ログで**確認する」と定めている。`just test` が動かないうちは RED を確認できないので、
 テストを書く前にここを通す。
 
-- [ ] **Step 1: `flake.nix` を作る**
+- [x] **Step 1: `flake.nix` を作る**
 
 ```nix
 {
@@ -127,7 +127,7 @@
 }
 ```
 
-- [ ] **Step 2: `.envrc` を作って direnv を許可する**
+- [x] **Step 2: `.envrc` を作って direnv を許可する**
 
 `.envrc`:
 
@@ -138,19 +138,19 @@ use flake
 Run: `direnv allow`
 Expected: devShell のビルドが走り、`shellHook` の `→ devShell: go1.26.5 / …` が出る（初回は数分かかる）
 
-- [ ] **Step 3: Go と golangci-lint が入ったことを確認する**
+- [x] **Step 3: Go と golangci-lint が入ったことを確認する**
 
 Run: `go version && golangci-lint version && just --version`
 Expected: `go version go1.26.5 …` / `golangci-lint has version 2.12.x` / `just 1.50.0`
 
 **ここで `go` が見つからない場合は direnv が効いていない。** 先に進まず `direnv status` を見る。
 
-- [ ] **Step 4: Go モジュールを初期化する**
+- [x] **Step 4: Go モジュールを初期化する**
 
 Run: `cd backend && go mod init github.com/taktiks2/go-todo/backend`
 Expected: `go: creating new go.mod: module github.com/taktiks2/go-todo/backend`
 
-- [ ] **Step 5: go directive を 1.26.0 に揃える**
+- [x] **Step 5: go directive を 1.26.0 に揃える**
 
 `go mod init` は**走らせた toolchain のパッチ番号まで**書く（実測: `go 1.26.5`）。
 Go 1.26 の Release Notes には「N-1 の `go 1.25.0` を書く」とあるが、この環境の実挙動は違った。
@@ -170,7 +170,7 @@ module github.com/taktiks2/go-todo/backend
 go 1.26.0
 ```
 
-- [ ] **Step 6: `backend/.golangci.yml` を作る**
+- [x] **Step 6: `backend/.golangci.yml` を作る**
 
 ```yaml
 version: "2"
@@ -188,7 +188,7 @@ formatters:
     - goimports
 ```
 
-- [ ] **Step 7: `justfile` を作る**
+- [x] **Step 7: `justfile` を作る**
 
 ```just
 # 引数なしで実行したらレシピ一覧を出す
@@ -216,7 +216,7 @@ fmt:
     golangci-lint fmt
 ```
 
-- [ ] **Step 8: `.gitignore` に追記する**
+- [x] **Step 8: `.gitignore` に追記する**
 
 既存の `# Editor / OS` セクションの前に、次のブロックを足す:
 
@@ -227,7 +227,7 @@ fmt:
 result
 ```
 
-- [ ] **Step 9: 計器が動くことを確認する**
+- [x] **Step 9: 計器が動くことを確認する**
 
 **この時点では `just test` も `just lint` も終了コードは 0 にならない。** Go ファイルが 1 つも
 存在しないため。緑になるのは Task 2 の GREEN からで、それが正常。ここで確認するのは
@@ -264,7 +264,7 @@ Expected: 終了コード 0（対象ファイルが無いので何もせず成�
 Run: `just`
 Expected: `default` / `dev` / `fmt` / `lint` / `test` のレシピ一覧
 
-- [ ] **Step 10: コミットする**
+- [x] **Step 10: コミットする**
 
 ```bash
 git add flake.nix flake.lock .envrc justfile .gitignore backend/go.mod backend/.golangci.yml
@@ -301,7 +301,7 @@ EOF
 - Consumes: Task 1 の module path
 - Produces: `config.Config{ Port int }` と `func config.Load() (Config, error)`。Task 4 の `main` が使う
 
-- [ ] **Step 1: 失敗するテストを書く（Claude）**
+- [x] **Step 1: 失敗するテストを書く（Claude）**
 
 `backend/internal/config/config_test.go`:
 
@@ -373,7 +373,7 @@ func TestLoad(t *testing.T) {
 - 境界値（1 / 65535 / 0 / 65536）を両側入れている。`< 1` を `<= 1` と書き間違えても捕まる
 - 「未設定」と「空文字で設定済み」を別ケースにしている。**この 2 つを区別するのが `Load()` の要点**
 
-- [ ] **Step 2: RED を実行ログで確認する**
+- [x] **Step 2: RED を実行ログで確認する**
 
 Run: `just test`
 Expected: FAIL。実測した出力は次のとおり（`config.go` がまだ無いのでビルドが通らない）:
@@ -387,7 +387,7 @@ FAIL
 **これは「テストが落ちた」ではなく「ビルドが通らない」RED である。** 最初のテストでは必ずこうなる。
 実装が入ったあと初めて、アサーションによる RED / GREEN が見えるようになる。
 
-- [ ] **Step 3: RED の状態でコミットする**
+- [x] **Step 3: RED の状態でコミットする**
 
 ```bash
 git add backend/internal/config/config_test.go
