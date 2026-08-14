@@ -110,8 +110,14 @@ gh issue list --label phase:1 --state open   # 0 件なら Phase 1 完了
 issue から作る。issue と自動で紐づく。
 
 ```sh
-gh issue develop 5 --checkout    # → 5-get-api-todos
+gh issue develop 5 --name 5-get-api-todos --checkout
 ```
+
+**`--name` を必ず付ける。** 省略すると issue のタイトルからブランチ名が生成される。
+このリポジトリは issue タイトルが日本語なので、
+`1-chore-gcp-プロジェクトと-terraform-state-バケットを用意する` のような名前ができる。
+git は通すが、CI のジョブ名やコンテナタグに載ると URL エンコードが絡んで読めなくなる。
+`<issue 番号>-<英小文字とハイフン>` に揃える。
 
 `main` への直接コミットはしない。
 GitHub Free + private では branch protection が使えないため、**これは自己規律で守る。**
