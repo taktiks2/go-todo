@@ -37,11 +37,11 @@ Claude が書いてしまうと、残るのは「Claude に go-todo を作らせ
 **すべての Go 実装は `pair-tdd` スキルのループで進める。** 例外は `mode:ai-only` の issue のみ。
 
 1. Claude が失敗するテストを書く（完成形。`// TODO` を残さない）
-2. `make test` で **RED を実行ログで確認する**
+2. `just test` で **RED を実行ログで確認する**
 3. `test(scope): ...` でコミット
 4. Claude が実装を提示する（ファイルパス・配置位置・**読みどころ**付き）
 5. **人間が手で書く。** Claude は待つ
-6. `make test` で GREEN を確認
+6. `just test` で GREEN を確認
 7. `feat(scope): ...` でコミット（バグ修正は `fix:`、振る舞いが変わらないなら `refactor:`）
 
 バグを手動確認中に見つけた場合も、このループを回す。1 行修正でも例外にしない。
@@ -98,7 +98,7 @@ gh issue list --label phase:1 --state open   # 0 件なら Phase 1 完了
 
 - [ ] `curl -s localhost:8080/api/todos | jq` → `[]` が返る
 - [ ] `curl -XPOST localhost:8080/api/todos -d '{"title":"あ"}' -i` → 201 と Location ヘッダ
-- [ ] `make test` が緑
+- [ ] `just test` が緑
 ```
 
 ---

@@ -96,7 +96,7 @@ go-todo/
 │   ├── tfstate-lifecycle.json    # state バケットの lifecycle rule
 │   └── setup-firebase.sh         # Firebase 側の手動設定を記録
 ├── .github/workflows/
-└── Makefile                      # make dev / test / migrate / gen の入口
+└── justfile                      # just dev / test / migrate / gen の入口
 ```
 
 ### 構成の判断理由
@@ -342,7 +342,7 @@ SMS 認証を有効にしない限り無料。ソーシャル / メールパス�
 
 ### 実行タイミング: CI のデプロイ前ステップ
 
-ローカルは `make migrate`。本番は GitHub Actions で Cloud Run デプロイの**前**に実行する。
+ローカルは `just migrate`。本番は GitHub Actions で Cloud Run デプロイの**前**に実行する。
 
 **アプリ起動時に自動実行しない理由**
 
@@ -604,7 +604,7 @@ GCP プロジェクト作成、課金紐付け、API 有効化、Artifact Regist
 Phase 0 はインフラだけではない。以下も Phase 0 で作り切る。
 
 - `backend/go.mod`（`go mod init`）と `docs/DESIGN.md` 3 章のディレクトリ構成
-- `Makefile`（`make dev` / `test` / `lint` の入口）
+- `justfile`（`just dev` / `test` / `lint` の入口）
 - `cmd/api/main.go`、`/healthz` ハンドラ、グレースフルシャットダウン
 
 こうしておくと Phase 1 の最初の issue が「土台 + 最初のエンドポイント」で肥大化せず、
