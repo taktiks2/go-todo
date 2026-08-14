@@ -24,8 +24,8 @@ assignees: ''
 
 ## 受け入れ条件
 
-- [ ] `make test` が緑
-- [ ] `make lint` が緑
+- [ ] `just test` が緑
+- [ ] `just lint` が緑
 - [ ]
 
 ## 動作確認コマンド
