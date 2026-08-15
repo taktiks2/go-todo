@@ -406,7 +406,7 @@ EOF
 )"
 ```
 
-- [ ] **Step 4: 実装を書く（人間の手番）**
+- [x] **Step 4: 実装を書く（人間の手番）**
 
 Claude はここで**止まる**。以下を提示するに留める。
 
@@ -459,7 +459,7 @@ func Load() (Config, error) {
 - `defaultPort` を定数に切り出しているのは、テストの期待値 `8080` と実装の `8080` が
   別々に書かれている状態を避けるため（片方だけ直す事故を防ぐ）
 
-- [ ] **Step 5: GREEN を確認する**
+- [x] **Step 5: GREEN を確認する**
 
 Run: `just test`
 Expected: PASS。`ok github.com/taktiks2/go-todo/backend/internal/config`
@@ -467,7 +467,7 @@ Expected: PASS。`ok github.com/taktiks2/go-todo/backend/internal/config`
 Run: `just lint`
 Expected: 終了コード 0
 
-- [ ] **Step 6: コミットする**
+- [x] **Step 6: コミットする**
 
 ```bash
 git add backend/internal/config/config.go
@@ -500,7 +500,7 @@ EOF
 - Consumes: Task 1 の module path
 - Produces: `type Handler struct{}` / `func NewHandler() *Handler` / `func (h *Handler) Healthz(w http.ResponseWriter, r *http.Request)` / `func (h *Handler) Routes() http.Handler`。Task 4 の `main` が `NewHandler()` と `Routes()` を使う
 
-- [ ] **Step 1: 失敗するテストを書く（Claude）**
+- [x] **Step 1: 失敗するテストを書く（Claude）**
 
 `backend/internal/http/handler_test.go`:
 
@@ -585,7 +585,7 @@ func TestRoutes(t *testing.T) {
 - `len(body) != 1` を見ているので、余計なフィールドが増えたら気づく
 - `t.Setenv` を使わないのでこちらは `t.Parallel()` を書いてよい
 
-- [ ] **Step 2: RED を実行ログで確認する**
+- [x] **Step 2: RED を実行ログで確認する**
 
 Run: `just test`
 Expected: `internal/config` は PASS のまま、`internal/http` が FAIL する:
@@ -597,7 +597,7 @@ FAIL	github.com/taktiks2/go-todo/backend/internal/http [build failed]
 FAIL
 ```
 
-- [ ] **Step 3: RED の状態でコミットする**
+- [x] **Step 3: RED の状態でコミットする**
 
 ```bash
 git add backend/internal/http/handler_test.go
@@ -617,7 +617,7 @@ EOF
 )"
 ```
 
-- [ ] **Step 4: 実装を書く（人間の手番）**
+- [x] **Step 4: 実装を書く（人間の手番）**
 
 Claude はここで**止まる**。以下を提示するに留める。
 
@@ -694,7 +694,7 @@ func (h *Handler) Routes() http.Handler {
   ミドルウェアに包んだとき（`RequestID(Logger(mux))`）に呼び出し側を変えずに済ませるため。
   **返り値は具体型で受けて interface で返す**のが Go の一般的な向き
 
-- [ ] **Step 5: GREEN を確認する**
+- [x] **Step 5: GREEN を確認する**
 
 Run: `just test`
 Expected: PASS。`ok .../internal/config` と `ok .../internal/http` の 2 行
@@ -702,7 +702,7 @@ Expected: PASS。`ok .../internal/config` と `ok .../internal/http` の 2 行
 Run: `just lint`
 Expected: 終了コード 0
 
-- [ ] **Step 6: コミットする**
+- [x] **Step 6: コミットする**
 
 ```bash
 git add backend/internal/http/handler.go backend/internal/http/router.go
@@ -737,7 +737,7 @@ EOF
 `main` はテストしない。ここは受け入れ条件の `curl` が担当する（`CONTRIBUTING.md` §6）。
 したがってこのタスクに RED / GREEN のサイクルは無い。
 
-- [ ] **Step 1: 実装を書く（人間の手番）**
+- [x] **Step 1: 実装を書く（人間の手番）**
 
 Claude はここで**止まる**。以下を提示するに留める。
 
@@ -794,12 +794,12 @@ func main() {
   今は起動しっぱなしなので素直に落として構わないが、#3 で `errors.Is(err, http.ErrServerClosed)` の
   分岐を足すことになる
 
-- [ ] **Step 2: ビルドと lint を確認する**
+- [x] **Step 2: ビルドと lint を確認する**
 
 Run: `just test && just lint`
 Expected: どちらも終了コード 0
 
-- [ ] **Step 3: 受け入れ条件を手で確認する**
+- [x] **Step 3: 受け入れ条件を手で確認する**
 
 `CONTRIBUTING.md` §6 の 3 つ目のゲート。**出力をコピーしておく**（PR 本文に貼る）。
 
@@ -832,7 +832,7 @@ PORT=abc go run ./cmd/api
 # → exit status 1
 ```
 
-- [ ] **Step 4: コミットする**
+- [x] **Step 4: コミットする**
 
 ```bash
 git add backend/cmd/api/main.go
@@ -867,7 +867,7 @@ EOF
 `CONTRIBUTING.md` §8 —「設計判断が変わったら、それを起こした PR の中で `docs/DESIGN.md` を直す。
 別 PR に切り出すと必ず後回しになり、ドキュメントが腐る」。
 
-- [ ] **Step 1: `docs/DESIGN.md` §3 の `main()` 例を直す（Claude）**
+- [x] **Step 1: `docs/DESIGN.md` §3 の `main()` 例を直す（Claude）**
 
 `docs/DESIGN.md:116-125` のコード例で `cfg := config.Load()` となっている行を、
 `Load()` が `(Config, error)` を返す形に合わせる:
@@ -884,7 +884,7 @@ func main() {
 }
 ```
 
-- [ ] **Step 2: `docs/DESIGN.md` §14 の「Go のバージョン」を確定させる（Claude）**
+- [x] **Step 2: `docs/DESIGN.md` §14 の「Go のバージョン」を確定させる（Claude）**
 
 `docs/DESIGN.md:667` を置き換える:
 
@@ -892,7 +892,7 @@ func main() {
 | Go のバージョン | **1.26**（#2 で確定）。`flake.nix` の `go_1_26` / `go.mod` の `go 1.26.0` / Dockerfile の `golang:1.26` を揃える |
 ```
 
-- [ ] **Step 3: `docs/DESIGN.md` §10「ローカル環境」に devShell を追記する（Claude）**
+- [x] **Step 3: `docs/DESIGN.md` §10「ローカル環境」に devShell を追記する（Claude）**
 
 `docs/DESIGN.md:537` の次に 1 行足す:
 
@@ -909,7 +909,7 @@ func main() {
 `nix flake update` を打ってもメジャーは動かない。
 ```
 
-- [ ] **Step 4: コミットする**
+- [x] **Step 4: コミットする**
 
 ```bash
 git add docs/DESIGN.md
@@ -925,14 +925,14 @@ EOF
 )"
 ```
 
-- [ ] **Step 5: `/code-review` を走らせる**
+- [x] **Step 5: `/code-review` を走らせる**
 
 `CONTRIBUTING.md` §6 の 2 つ目のゲート。**テスト自体の妥当性**も見てもらう。
 この体制ではテストの誤りが緑のまま素通りするため、ここが数少ない検出機会になる。
 
 指摘は盲信も無視もしない。根拠を確認し、納得できなければ議論する。
 
-- [ ] **Step 6: push して PR を作る**
+- [x] **Step 6: push して PR を作る**
 
 ```bash
 git push -u origin 2-go-foundation-healthz
@@ -964,7 +964,7 @@ $ PORT=abc go run ./cmd/api
 （ここに実際の出力）
 ```
 
-- [ ] **Step 7: マージ前の 3 ゲートを確認して squash merge**
+- [x] **Step 7: マージ前の 3 ゲートを確認して squash merge**
 
 `CONTRIBUTING.md` §6。**CI は自動で止めてくれない**（branch protection が使えない）ので、
 3 つとも自分で見る。

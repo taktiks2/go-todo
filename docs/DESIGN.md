@@ -115,7 +115,8 @@ Go 単体リポジトリならルートが慣習だが、多言語モノレポ�
 
 ```go
 func main() {
-    cfg  := config.Load()
+    cfg, err := config.Load()       // 不正な設定は起動前に落とす（#2 で確定）
+    if err != nil { /* slog.Error して os.Exit(1) */ }
     pool := pgxpool.New(ctx, cfg.DatabaseURL)
     repo := postgres.NewTodoRepository(pool)
     svc  := todo.NewService(repo)
@@ -535,9 +536,12 @@ sqlmock は「発行された SQL 文字列が期待と一致するか」を見�
 | 開発用 DB | `compose.yaml` で Postgres 1 サービスのみ |
 | テスト用 DB | testcontainers（毎回使い捨て） |
 | Go | ホストで直接実行（`go run` / `air`） |
+| Go / golangci-lint / just のバージョン供給 | nix devShell + direnv（`flake.nix` / `.envrc`。#2 で導入） |
 | フロント | `vite dev`（`/api` を `localhost:8080` にプロキシ） |
 
 **Go をコンテナに入れない。** `go run` はホストなら 1 秒台だが、コンテナ経由だとファイル同期とビルドで体感が数倍遅くなり、デバッガや LSP の設定も面倒になる。
+
+**ただしバージョンは各自の環境任せにしない。** 上の判断はビルドとファイル同期の速度の話であって、ツールをどこから持ってくるかとは別問題。`flake.nix` の `go_1_26` が `go.mod` の `go 1.26.0` と Dockerfile の `golang:1.26` に対応し、`nix flake update` を打ってもメジャーは動かない。`pkgs.go`（常に最新安定版）にすると、ある日 Go だけ 1.27 に上がって Dockerfile 側が取り残される。
 
 Docker ランタイムは colima を想定（testcontainers-go は `DOCKER_HOST` を見るため動作する）。
 
@@ -664,4 +668,4 @@ Phase 2 で `postgres` 実装に差し替えたとき、**`todo` パッケージ
 | `golangci-lint` | **既定のまま**始める。必要を感じてから絞る |
 | Docker ランタイム | colima |
 | Neon のリージョン | 東京に最も近いもの |
-| Go のバージョン | 着手時の最新安定版 |
+| Go のバージョン | **1.26**（#2 で確定）。`flake.nix` の `go_1_26` / `go.mod` の `go 1.26.0` / Dockerfile の `golang:1.26` を揃える |
