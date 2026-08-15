@@ -1,0 +1,19 @@
+version: "2"
+
+linters:
+  # standard = errcheck / govet / ineffassign / staticcheck / unused。
+  # docs/DESIGN.md §14「既定のまま始める。必要を感じてから絞る」に従う。
+  default: standard
+
+formatters:
+  # v2 でフォーマッタは linters から分離された。ここで有効にしないと
+  # `golangci-lint fmt` は何もしない。
+  # goimports は gofmt の上位互換なので gofmt は入れない。
+  enable:
+    - goimports
+  settings:
+    goimports:
+      # 自モジュールの import を第三者パッケージと別グループに寄せる。
+      # 指定が無いと internal/... が第三者ブロックに混ざる。
+      local-prefixes:
+        - github.com/taktiks2/go-todo/backend
