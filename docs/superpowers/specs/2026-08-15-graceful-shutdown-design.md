@@ -140,7 +140,11 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 
 `backend/cmd/api/main_test.go`（`package main`）。`t.Setenv` を使わないので全ケース `t.Parallel()` を付ける。
 
-### `TestRun_処理中のリクエストを捌き切ってから終了する`
+テスト関数名は既存の `TestHealthz` / `TestRoutes` に合わせて ASCII、説明は日本語のコメントと
+エラーメッセージで書く（`backend/internal/http/handler_test.go` と同じ流儀）。
+`run` は未公開なので外部テストパッケージにはできず、`package main` に置く。
+
+### `TestRunDrainsInFlightRequests`
 
 **受け入れ条件の本体。**
 
@@ -160,12 +164,12 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 `run` が戻った後もハンドラの goroutine が走り続けるため、テスト終了後の `t.*` 呼び出しは panic になる。
 検証はすべてテスト本体の goroutine で行い、ハンドラは channel で状態を渡すだけにする。
 
-### `TestRun_ドレイン時間を超えたらエラーを返す`
+### `TestRunReportsDrainTimeout`
 
 `shutdownTimeout` に 20ms、ハンドラに 200ms のスリープを渡し、
 `errors.Is(err, context.DeadlineExceeded)` を検証する。**「`Shutdown` の戻り値を捨てない」を固定するテスト。**
 
-### `TestRun_Serve が失敗したらエラーを返す`
+### `TestRunReportsServeError`
 
 `run` に渡す前に `ln.Close()` しておき、`run` が non-nil を返すことを検証する。
 `http.ErrServerClosed` 以外を握り潰していないことを固定する。
