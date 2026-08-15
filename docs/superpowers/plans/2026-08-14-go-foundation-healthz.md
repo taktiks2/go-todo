@@ -932,7 +932,7 @@ EOF
 
 指摘は盲信も無視もしない。根拠を確認し、納得できなければ議論する。
 
-- [ ] **Step 6: push して PR を作る**
+- [x] **Step 6: push して PR を作る**
 
 ```bash
 git push -u origin 2-go-foundation-healthz
