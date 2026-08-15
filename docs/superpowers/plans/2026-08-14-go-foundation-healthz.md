@@ -932,7 +932,7 @@ EOF
 
 指摘は盲信も無視もしない。根拠を確認し、納得できなければ議論する。
 
-- [x] **Step 6: push して PR を作る**
+- [ ] **Step 6: push して PR を作る**
 
 ```bash
 git push -u origin 2-go-foundation-healthz
@@ -964,7 +964,7 @@ $ PORT=abc go run ./cmd/api
 （ここに実際の出力）
 ```
 
-- [x] **Step 7: マージ前の 3 ゲートを確認して squash merge**
+- [ ] **Step 7: マージ前の 3 ゲートを確認して squash merge**
 
 `CONTRIBUTING.md` §6。**CI は自動で止めてくれない**（branch protection が使えない）ので、
 3 つとも自分で見る。

@@ -17,13 +17,16 @@ go.work.sum
 # Environment / secrets
 .env
 .env.*
+!.env.example
 *credentials*
 serviceAccountKey.json
 
 # nix / direnv
 .direnv/
 .gobin/
-result
+# 先頭 / が無いと任意の深さの result/ に当たる。
+# internal/result のような普通のパッケージ名を巻き込むため root に固定する。
+/result
 
 # Editor / OS
 .DS_Store

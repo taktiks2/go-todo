@@ -29,7 +29,14 @@
               gopls           # 公式 LSP
               gotools         # goimports / godoc / stringer
               delve           # デバッガ (dlv)
-              golangci-lint   # 統合 linter (v2 系)
+
+              # nixpkgs にバージョン付きの attr が無いため golangci-lint は固定できない。
+              # 現在 2.12.2、backend/.golangci.yml は `version: "2"` 形式に依存している。
+              # 将来 v3 が来て `nix flake update` を打つと設定が読めなくなるので、
+              # そのときは `golangci-lint migrate` を流す。flake.lock がある限り
+              # 勝手には上がらない。
+              golangci-lint
+
               just
               jq
             ];
@@ -37,7 +44,10 @@
             shellHook = ''
               # `go install` の出力をプロジェクトローカルに分離する。
               # GOPATH (= モジュールキャッシュ) はあえて触らず global 共有を維持。
-              export GOBIN="$PWD/.gobin"
+              #
+              # $PWD ではなくリポジトリルートから引く。backend/ で `nix develop` を
+              # 叩いた人だけ backend/.gobin という別の置き場を持ってしまうため。
+              export GOBIN="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")/.gobin"
               export PATH="$GOBIN:$PATH"
               mkdir -p "$GOBIN"
               echo "→ devShell: $(go version | awk '{print $3}') / golangci-lint $(golangci-lint version --short 2>/dev/null)"

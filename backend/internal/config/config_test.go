@@ -27,6 +27,13 @@ func TestLoad(t *testing.T) {
 		{name: "PORT が 0 ならエラー", port: "0", wantErr: true},
 		{name: "PORT が 65536 ならエラー", port: "65536", wantErr: true},
 		{name: "PORT が負ならエラー", port: "-1", wantErr: true},
+
+		// strconv.Atoi が何を受けて何を弾くかを明示的に固定する。
+		// PORT は docs/DESIGN.md §9 が「最頻出の詰まりどころ」と名指ししており、
+		// 「なんとなく通る／通らない」を残さない。
+		{name: "PORT の先頭 + は符号として受ける", port: "+8080", wantPort: 8080},
+		{name: "PORT の先頭ゼロは 10 進として読む", port: "08080", wantPort: 8080},
+		{name: "PORT の前後に空白があればエラー", port: " 8080", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -46,6 +53,12 @@ func TestLoad(t *testing.T) {
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("Load() = %+v, err = nil; エラーを期待した", got)
+				}
+				// エラー時に中途半端に埋まった Config を返さないことを固定する。
+				// これが無いと `return Config{Port: port}, err` に書き換わっても
+				// 全ケース緑のまま素通りする。
+				if got != (config.Config{}) {
+					t.Errorf("エラー時の Config = %+v, want ゼロ値", got)
 				}
 				return
 			}

@@ -8,6 +8,12 @@ linters:
 formatters:
   # v2 でフォーマッタは linters から分離された。ここで有効にしないと
   # `golangci-lint fmt` は何もしない。
+  # goimports は gofmt の上位互換なので gofmt は入れない。
   enable:
-    - gofmt
     - goimports
+  settings:
+    goimports:
+      # 自モジュールの import を第三者パッケージと別グループに寄せる。
+      # 指定が無いと internal/... が第三者ブロックに混ざる。
+      local-prefixes:
+        - github.com/taktiks2/go-todo/backend
