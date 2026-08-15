@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/taktiks2/go-todo/backend/internal/config"
 	httpapi "github.com/taktiks2/go-todo/backend/internal/http"
@@ -20,8 +21,12 @@ func main() {
 	h := httpapi.NewHandler()
 
 	srv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: h.Routes(),
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           h.Routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	slog.Info("starting server", "addr", srv.Addr)
