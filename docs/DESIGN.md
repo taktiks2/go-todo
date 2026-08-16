@@ -391,25 +391,79 @@ Cloud Run は既定で最大 100 インスタンスまで増える。各イン�
 
 ### グレースフルシャットダウン（必須）
 
-Cloud Run はインスタンス停止時に **SIGTERM を送り、10 秒後に SIGKILL** する。無視すると処理中のリクエストが切断される。
+Cloud Run はインスタンス停止時に **SIGTERM を送り、10 秒後に SIGKILL** する。この猶予は固定で、設定できない。無視すると処理中のリクエストが切断される。
+
+**ただし SIGTERM は保証されない。** インフラ都合で送られないことがあるため、グレースフルシャットダウンは best-effort として扱い、これに依存した整合性設計はしない。
+
+`main()` は薄く保ち、本体をテストできる `run()` に寄せる（#3 で確定）。
 
 ```go
-ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
-defer stop()
+// Cloud Run の 10 秒に対するマージン。残り 2 秒を後片付けとプロセス終了に残す。
+const defaultShutdownTimeout = 8 * time.Second
 
-go func() {
-    if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-        slog.Error("server error", "err", err)
+func main() {
+    // ... config.Load() / httpapi.NewHandler() / http.Server の組み立て
+
+    // listen を main が持つと bind 失敗を起動時に切り分けられる。
+    // Cloud Run が注入した PORT に bind できない事故はここで死ぬ。
+    ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Port))
+    if err != nil {
+        slog.Error("listen", "err", err)
         os.Exit(1)
     }
-}()
 
-<-ctx.Done()
-shutdownCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-defer cancel()
-_ = srv.Shutdown(shutdownCtx)
-pool.Close()
+    if err := run(context.Background(), ln, srv, defaultShutdownTimeout); err != nil {
+        slog.Error("server", "err", err)
+        os.Exit(1)
+    }
+}
+
+func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout time.Duration) error {
+    ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
+    defer stop()
+
+    errCh := make(chan error, 1)
+    go func() { errCh <- srv.Serve(ln) }()
+
+    slog.Info("server started", "addr", ln.Addr().String())
+
+    select {
+    case err := <-errCh: // Shutdown を呼ぶ前に落ちた = 異常
+        if errors.Is(err, http.ErrServerClosed) {
+            return nil
+        }
+
+        return fmt.Errorf("serve: %w", err)
+    case <-ctx.Done():
+    }
+
+    slog.Info("shutting down", "cause", context.Cause(ctx))
+    stop() // 2 回目の SIGTERM / Ctrl-C を既定動作に戻す
+
+    shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+    defer cancel()
+
+    if err := srv.Shutdown(shutdownCtx); err != nil {
+        return fmt.Errorf("shutdown: %w", err)
+    }
+
+    // Phase 2 では pool.Close() をここに置く。Shutdown が戻った時点で
+    // 処理中のリクエストは DB を使い終わっている、という順序が要る。
+    return nil
+}
 ```
+
+この形が抱えている判断は 5 つ。
+
+- **`net.Listener` を `main` が作る。** `ListenAndServe` は `:0` で待ち受けても実ポートを教えてくれず、実 TCP を張るテストが固定ポート頼みになって flaky になる。listener を注入すれば `127.0.0.1:0` でテストでき、同時に bind 失敗を起動時に切り分けられる
+- **`signal.NotifyContext` を `run` の中に置く。** 呼び出し側は親 `ctx` を渡すだけでよく、テストは `cancel()` でシグナルと同じ経路を通せる
+- **`<-ctx.Done()` の直後に `stop()` を呼ぶ。** `NotifyContext` は `stop()` を呼ぶまで 2 回目の SIGTERM / Ctrl-C を食い止める。呼ばないと、ドレインが詰まったときオペレータが 2 回目を押しても効かず SIGKILL を待つしかない
+- **`srv.Shutdown` の戻り値を捨てない。** ctx が期限切れなら `Shutdown` は ctx のエラーを返す。それは「猶予内に捌き切れずリクエストを切った」という事実そのもので、捨てると本番で断続的に接続が切れていても気づけない
+- **シャットダウン用 ctx の親は `context.Background()`。** `ctx` から派生させると既にキャンセル済みなので `Shutdown` が即座に諦め、1 リクエストも捌かない
+
+`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラー（SIGTERM なら `terminated signal received`）を入れる。Cloud Run のスケールダウンかローカルの Ctrl-C かがログで区別できる。**ただし戻りは wrap されていないため `errors.Is(..., context.Canceled)` は false になる。ログ専用に使い、判定には使わない。**
+
+**アプリが PID 1 で SIGTERM を受け取る必要がある。** Dockerfile の `ENTRYPOINT` をシェル形式で書くとシグナルが届かず、この節の実装が丸ごと無意味になる。下の Dockerfile 例が exec 形式なのはそのため。
 
 この形は Kubernetes でも同じ。コンテナ上で動くサーバの基本作法。
 
