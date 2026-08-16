@@ -16,23 +16,25 @@ import (
 	httpapi "github.com/taktiks2/go-todo/backend/internal/http"
 )
 
-// タイムアウトの予算。守るべき関係は 3 つ。
+// タイムアウトの定数。定数どうしで守れる関係は 2 つだけで、
+// どちらも TestTimeoutBudget で縛っている。
 //
-//	readHeaderTimeout < readTimeout                        ヘッダとボディを分ける
-//	readTimeout + writeTimeout <= defaultShutdownTimeout   1 接続の最悪占有
-//	defaultShutdownTimeout < cloudRunTerminationGrace      SIGKILL に間に合う
-//
-// 2 つ目が「和」になるのは、net/http が WriteTimeout の期限を readRequest の
-// defer で、つまりヘッダを読み終えてから設定するため。読み取りと書き込みの
-// 予算は重ならず順に消費されるので、1 接続の最悪占有は両者の合計になる。
+//	readHeaderTimeout < readTimeout                    ヘッダとボディを分ける
+//	defaultShutdownTimeout < cloudRunTerminationGrace  SIGKILL に間に合う
 //
 // 1 つ目が要るのは、両者が同値だと ReadHeaderTimeout が実質無効になるため。
 // net/http は ReadHeaderTimeout が 0 のとき ReadTimeout にフォールバックし、
 // さらに両者が等しいとボディ用の読み取り期限を延長する分岐が死ぬ。
 //
-// 破れると「サーバ自身の契約では正当なリクエストを、ドレインが先に諦めて切る」
-// ことになり、通常のスケールダウンのたびにエラーログと非ゼロ終了が出る。
-// この関係は TestTimeoutBudget で縛っている。
+// **「ドレインが必ず間に合う」はここでは保証できない。**
+// WriteTimeout はソケットの書き込み期限であって、ハンドラの実行時間を止めない。
+// DB クエリが長引けば接続は active のままなので、Shutdown は猶予を使い切る。
+// ハンドラ自体を縛るには http.TimeoutHandler が要るが、それはミドルウェアの
+// 領域（Phase 1）。**ドレイン超過は起こりうる前提**で、起きたことが
+// run の戻り値とログに出る形にしてある。
+//
+// 値そのものは #2 で決めたリクエスト側の契約。Cloud Run の猶予から
+// 逆算して狭めない（依存の向きが逆になる）。
 const (
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
@@ -199,8 +201,12 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	return errors.Join(serveError(serveErr), shutdownErr)
 }
 
+// newServer はタイムアウトの定数を配線した http.Server を返す。
+// main から切り出してあるのは、配線をテストで確かめられるようにするため
+// （TestNewServerUsesTimeoutBudget）。
 func newServer(h http.Handler) *http.Server {
 	return &http.Server{
+		// Addr は設定しない。Serve(ln) は見ないので、持たせると嘘になる。
 		Handler:           h,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
