@@ -522,7 +522,7 @@ RUN go mod download                    # 依存だけ先にコピーしてレイ
 COPY . .
 RUN CGO_ENABLED=0 go build -o /app ./cmd/api
 
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=build /app /app
 USER nonroot:nonroot
 ENTRYPOINT ["/app"]
@@ -533,8 +533,24 @@ ENTRYPOINT ["/app"]
 **この 10 行の学習ポイント**
 
 - `CGO_ENABLED=0` で静的リンクバイナリになる。だから実行イメージに libc すら要らない。Ruby や Python では真似できない Go の武器
-- 結果イメージは約 20MB。**Cloud Run はリクエスト受信後にコンテナを起動するため、イメージサイズがそのままコールドスタート時間に効く**
+- 結果イメージは約 8MB（#4 で実測 7.92MB。distroless/static が約 2MB、バイナリが 5.81MB）。**Cloud Run はリクエスト受信後にコンテナを起動するため、イメージサイズがそのままコールドスタート時間に効く**
 - `distroless/static` にはシェルもパッケージマネージャもない。攻撃面が最小になる代わりに「コンテナに入って調べる」ができない。**だからログ設計が重要になる**
+
+**実物との差分（#4 で確定）**
+
+上の 10 行は骨格で、`backend/Dockerfile` はここから実務水準に肉付けしてある。増やした分と理由:
+
+| 追加 | 理由 |
+|---|---|
+| `FROM --platform=$BUILDPLATFORM` + `GOOS`/`GOARCH` でクロスコンパイル | 付けないとビルドステージごと amd64 が引かれ、**Go コンパイラ自体が QEMU で走る**。Apple Silicon で書いて Cloud Run（x86_64 のみ）に載せる以上、避けて通れない。`CGO_ENABLED=0` だからこそ成立する |
+| ベースイメージの digest ピン（`name:tag@sha256:...`） | タグは中身が入れ替わる。タグと digest を両方書けば、読めて、かつ再現する |
+| `static-debian13` とサフィックスを明示 | サフィックス無しの `static` は現在 debian13 を指すが、**将来次の Debian に黙って移る** |
+| BuildKit cache mount（`/go/pkg/mod` と `/root/.cache/go-build`） | 依存が増える Phase 1 以降で効く。効果が出てから入れると「なぜ遅いか」の調査から始まることになる |
+| `ENV GOTOOLCHAIN=local` | 既定の `auto` は `go.mod` がイメージより新しい Go を要求すると**黙って別のツールチェーンを落とす**。`local` ならその場で落ちる |
+| `-trimpath -ldflags="-s -w"` | ビルドパスを消して再現性を上げ、8.44MB → 5.81MB（実測）。panic のスタックトレースは pclntab 由来なので残り、失うのは `dlv` でのアタッチだけ |
+| `COPY go.mod go.su[m] ./`（glob） | 外部依存ゼロの間は `go.sum` が存在せず、上の例の `COPY go.mod go.sum ./` はそのままでは落ちる |
+| `backend/.dockerignore`（許可リスト方式） | `*` で全除外してから戻す。`backend/` に置かれた意図しないファイルがビルドコンテキストに入らない |
+| `EXPOSE` を**書かない** | `PORT` は実行時に決まるので `EXPOSE 8080` は嘘になる。Cloud Run は `EXPOSE` を見ない |
 
 ### 設定とシークレット
 
@@ -642,9 +658,11 @@ sqlmock は「発行された SQL 文字列が期待と一致するか」を見�
 
 **ただし `go run` は使わない（#3 で確定）。** `go run` はビルドしたバイナリを別プロセスとして起動し、SIGTERM を転送しない。`just` → `go run` → バイナリの 3 段になるため、シェルから `kill -TERM %1` を打ってもバイナリに届かず、しかも `go run` が死んだ後もバイナリが孤児として残ってポートを掴む。`just dev` はビルドしてから `exec` でバイナリに置き換える形にしてある。詳細は `justfile` のコメント。
 
-**ただしバージョンは各自の環境任せにしない。** 上の判断はビルドとファイル同期の速度の話であって、ツールをどこから持ってくるかとは別問題。`flake.nix` の `go_1_26` が `go.mod` の `go 1.26.0` と Dockerfile の `golang:1.26` に対応し、`nix flake update` を打ってもメジャーは動かない。`pkgs.go`（常に最新安定版）にすると、ある日 Go だけ 1.27 に上がって Dockerfile 側が取り残される。
+**ただしバージョンは各自の環境任せにしない。** 上の判断はビルドとファイル同期の速度の話であって、ツールをどこから持ってくるかとは別問題。`flake.nix` は `pkgs.go`（常に最新安定版）ではなく `go_1_26` を指しており、`nix flake update` を打ってもマイナーは動かない。`pkgs.go` にすると、ある日 Go だけ 1.27 に上がって Dockerfile 側が取り残される。
 
-Docker ランタイムは colima を想定（testcontainers-go は `DOCKER_HOST` を見るため動作する）。
+**揃えるのはマイナーまで。パッチは供給元に任せ、下限を `go.mod` の go directive で保証する（#4 で改定）。** 供給元が nixpkgs（`flake.nix`）・Docker Hub（`Dockerfile`）・`go.mod` の 3 系統に分かれており、パッチまで人手で揃え続けると必ず腐る（2026-08 時点で nixpkgs は 1.26.5、Docker Hub の最新は 1.26.6）。go directive は機械的に検証される下限であり、`Dockerfile` の `ENV GOTOOLCHAIN=local` と組み合わせれば、「イメージの Go が `go.mod` の要求を満たさない」状態がビルドの失敗として現れる。
+
+Docker ランタイムは **Docker Desktop**（#4 で確定。colima を想定していたが未導入だった）。testcontainers-go は `DOCKER_HOST` を見るため、どちらでも動作する。
 
 ### SQLite を使わない理由
 
@@ -756,7 +774,7 @@ Phase 2 で `postgres` 実装に差し替えたとき、**`todo` パッケージ
 - **Neon はクロスクラウド**。Cloud Run（GCP asia-northeast1）から Neon（AWS）へは数〜数十 ms のレイテンシが乗る。学習用途では無視できるが、**「本番なら Cloud SQL を選ぶ理由」がここにある**と理解しておく。Phase 5 で Cloud SQL を一度試す
 - **Terraform 先行の学習負荷**。Go ほぼ未経験との組み合わせで負荷が高い。Phase 0 のインフラを書き切ったら**しばらく触らない**と決めて Go に戻る
 - **Phase 0 が最難関**。Go が 1 行も出てこない。ここを「アプリ開発の前の関門」と割り切れるかが完走の分かれ目
-- **Artifact Registry の無料枠は 0.5 GB/月**。distroless イメージ約 20 MB × デプロイ回数で、30〜40 回のデプロイで超える。超過は $0.10/GB/月 なので額は小さいが、#5 でリポジトリを作るときに cleanup policy を入れる
+- **Artifact Registry の無料枠は 0.5 GB/月**。distroless イメージ約 8 MB（#4 で実測）× デプロイ回数で、60 回前後のデプロイで超える。超過は $0.10/GB/月 なので額は小さいが、#5 でリポジトリを作るときに cleanup policy を入れる
 - **Cloud Run の無料枠にリージョン制限があるか未確認**。公式の Free Tier ページは Cloud Storage にだけ「US リージョンのみ」と明記し、Cloud Run には書いていないが、二次情報は US 3 リージョン限定と主張している。**#5 でリージョンを確定する前に公式ページで確認する。** US 限定なら `asia-northeast1` 前提そのものを見直すことになる
 
 ### 着手時に決めること
@@ -767,6 +785,6 @@ Phase 2 で `postgres` 実装に差し替えたとき、**`todo` パッケージ
 | GCP プロジェクト ID | `taktiks2-go-todo`（#1 で確定。変更不可） |
 | state バケットの location | `us-central1`（無料枠が US 限定のため Cloud Run と分ける） |
 | `golangci-lint` | **既定のまま**始める。必要を感じてから絞る |
-| Docker ランタイム | colima |
+| Docker ランタイム | **Docker Desktop**（#4 で確定。colima は未導入だった） |
 | Neon のリージョン | 東京に最も近いもの |
-| Go のバージョン | **1.26**（#2 で確定）。`flake.nix` の `go_1_26` / `go.mod` の `go 1.26.0` / Dockerfile の `golang:1.26` を揃える |
+| Go のバージョン | **1.26**（#2 で確定）。`flake.nix` の `go_1_26` / `go.mod` の `go 1.26.5` / Dockerfile の `golang:1.26.6-trixie`。**揃えるのはマイナーまでで、パッチの下限は `go.mod` が保証する**（#4 で改定。§10 参照） |
