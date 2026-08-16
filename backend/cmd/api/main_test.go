@@ -127,22 +127,35 @@ func waitForRun(t *testing.T, runErr <-chan error) error {
 	}
 }
 
-// TestTimeoutBudget は、ハンドラに許す時間・ドレイン猶予・Cloud Run の SIGKILL
-// までの猶予が、この順に短くなっていることを固定する。
+// TestTimeoutBudget は、1 接続が居座れる最長時間がドレイン猶予に収まり、
+// ドレイン猶予が Cloud Run の SIGKILL に間に合うことを固定する。
 //
-// 逆転すると「WriteTimeout の契約では正当なリクエストを、ドレインが先に
-// 諦めて切る」ことになり、通常のスケールダウンのたびに ERROR ログと
-// 非ゼロ終了が出る。受け入れ条件「SIGTERM で終了するときエラーログを
-// 出さない」を構造的に破るので、定数の関係としてテストで縛る。
+// 破れると「サーバ自身の契約では正当なリクエストを、ドレインが先に諦めて切る」
+// ことになり、通常のスケールダウンのたびに ERROR ログと非ゼロ終了が出る。
+// 受け入れ条件「SIGTERM で終了するときエラーログを出さない」を構造的に破る。
 func TestTimeoutBudget(t *testing.T) {
 	t.Parallel()
 
-	if readTimeout > defaultShutdownTimeout {
-		t.Errorf("readTimeout %v > defaultShutdownTimeout %v", readTimeout, defaultShutdownTimeout)
+	// ヘッダとボディで別の予算にする。同値だと ReadHeaderTimeout が実質
+	// 無効になる。net/http は ReadHeaderTimeout が 0 なら ReadTimeout に
+	// フォールバックし（server.go の readHeaderTimeout()）、さらに
+	// 両者が等しいとボディ用の読み取り期限を延長する分岐が死ぬため、
+	// ヘッダだけを短く縛る slowloris 対策が消える。
+	if readHeaderTimeout >= readTimeout {
+		t.Errorf(
+			"readHeaderTimeout %v >= readTimeout %v（ヘッダとボディの予算が分離されていない）",
+			readHeaderTimeout, readTimeout,
+		)
 	}
 
-	if writeTimeout > defaultShutdownTimeout {
-		t.Errorf("writeTimeout %v > defaultShutdownTimeout %v", writeTimeout, defaultShutdownTimeout)
+	// 読み取りと書き込みの予算は重ならず順に消費される。net/http は
+	// WriteTimeout の期限を readRequest の defer で、つまりヘッダを
+	// 読み終えてから設定するため、1 接続の最悪占有は両者の和になる。
+	if occupancy := readTimeout + writeTimeout; occupancy > defaultShutdownTimeout {
+		t.Errorf(
+			"readTimeout + writeTimeout = %v > defaultShutdownTimeout %v（ドレインが先に諦める）",
+			occupancy, defaultShutdownTimeout,
+		)
 	}
 
 	if defaultShutdownTimeout >= cloudRunTerminationGrace {
@@ -271,6 +284,113 @@ func TestRunClosesConnectionsWhenDrainTimesOut(t *testing.T) {
 		}
 	case <-time.After(waitLimit):
 		t.Fatal("ドレイン超過後も接続が開いたまま（srv.Close() が呼ばれていない）")
+	}
+}
+
+// errAcceptBoom は failAfterListener が意図的に返す恒久エラー。
+// net/http は一時エラーだと Accept をリトライするので、Temporary() を
+// 持たないただの error にして必ず Serve を戻す。
+var errAcceptBoom = errors.New("accept boom")
+
+// failAfterListener は fail が閉じられたあとの Accept を恒久エラーにする listener。
+//
+// Accept は本物の listener で待ち受けているので、止めるには fail を閉じたうえで
+// 下位の listener も閉じて叩き起こす必要がある。failNow がその 2 つをまとめる。
+type failAfterListener struct {
+	net.Listener
+
+	fail chan struct{}
+}
+
+func newFailAfterListener(t *testing.T) *failAfterListener {
+	t.Helper()
+
+	return &failAfterListener{Listener: newListener(t), fail: make(chan struct{})}
+}
+
+func (l *failAfterListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		select {
+		case <-l.fail:
+			return nil, errAcceptBoom // 意図的に失敗させた
+		default:
+			return nil, err
+		}
+	}
+
+	return conn, nil
+}
+
+func (l *failAfterListener) failNow() {
+	close(l.fail)
+	_ = l.Close()
+}
+
+// TestRunDrainsWhenServeFails は、accept ループが死んだときでも受理済みの
+// リクエストを捌き切ってから戻ることを検証する。
+//
+// accept が失敗したことは、既に受理済みの接続の健全性とは無関係。ここで
+// いきなり srv.Close() すると、ドレイン猶予を 1 秒も使わないまま処理中の
+// リクエストを全部切ることになり、この issue の目的と矛盾する。
+func TestRunDrainsWhenServeFails(t *testing.T) {
+	t.Parallel()
+
+	ln := newFailAfterListener(t)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
+	srv := &http.Server{
+		Handler:           blockingHandler(entered, release),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	runErr := make(chan error, 1)
+	go func() { runErr <- run(t.Context(), ln, srv, 8*time.Second) }()
+
+	resCh := getAsync(t, ln.Addr().String())
+
+	// リクエストが処理中になるまで待つ
+	select {
+	case <-entered:
+	case <-time.After(waitLimit):
+		t.Fatal("ハンドラに到達しなかった")
+	}
+
+	// accept ループを殺す
+	ln.failNow()
+
+	// 処理中のリクエストが残っている間、run は戻ってはいけない
+	select {
+	case err := <-runErr:
+		t.Fatalf("処理中のリクエストを捌かずに戻った: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	releaseOnce()
+
+	// 処理中だったリクエストは切断されず完走する
+	select {
+	case res := <-resCh:
+		if res.err != nil {
+			t.Fatalf("処理中のリクエストが切断された: %v", res.err)
+		}
+		if res.status != http.StatusOK {
+			t.Errorf("status = %d, want %d", res.status, http.StatusOK)
+		}
+		if res.body != "drained" {
+			t.Errorf("body = %q, want %q", res.body, "drained")
+		}
+	case <-time.After(waitLimit):
+		t.Fatal("レスポンスが返らなかった")
+	}
+
+	// 捌き切ったうえで、accept が死んだ事実は戻り値に出る
+	if err := waitForRun(t, runErr); !errors.Is(err, errAcceptBoom) {
+		t.Errorf("run() = %v, want %v を含むエラー", err, errAcceptBoom)
 	}
 }
 
