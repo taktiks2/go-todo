@@ -36,16 +36,17 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 COPY . .
 
-# ビルドキャッシュの id に TARGETARCH を混ぜる。GOCACHE の中身はアーキごとに
-# 別物で、共有すると毎回捨てられてキャッシュの意味がなくなる。
+# GOCACHE はアーキごとに分けない。Go のビルドキャッシュは内容アドレス方式で、
+# GOOS/GOARCH は各エントリのキーに入っている。amd64 と arm64 の成果物は
+# 1 つのキャッシュに共存でき、破棄は使われなくなってからの経過時間で決まる。
 #
 # -trimpath        バイナリから /src などの絶対パスを消す。ビルド環境が変わっても
 #                  同じ入力なら同じ出力になる
-# -ldflags="-s -w" シンボルテーブルと DWARF を落とす。8.44MB -> 5.81MB（実測）。
+# -ldflags="-s -w" シンボルテーブルと DWARF を落とす。8.85MB -> 6.10MB（実測）。
 #                  panic のスタックトレースは pclntab 由来なので残る。失うのは
 #                  dlv でのアタッチだけで、distroless には dlv もシェルも無い
 RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build,id=go-build-${TARGETARCH} \
+    --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/app ./cmd/api
 
@@ -59,7 +60,7 @@ COPY --from=build /out/app /app
 USER 65532:65532
 
 # EXPOSE は書かない。PORT は実行時に決まるので 8080 と書くと嘘になる。
-# cmd/api/main.go:145 が http.Server.Addr を持たないのと同じ理由。
+# cmd/api の newServer が http.Server.Addr を持たないのと同じ理由。
 
 # exec 形式。シェル形式にするとシェルが PID 1 になり SIGTERM がアプリに届かず、
 # #3 のグレースフルシャットダウンが丸ごと無意味になる（docs/DESIGN.md §9）。
