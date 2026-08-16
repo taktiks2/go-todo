@@ -16,6 +16,15 @@ import (
 	httpapi "github.com/taktiks2/go-todo/backend/internal/http"
 )
 
+// タイムアウトの予算。短い順に
+//
+//	ハンドラに許す時間 (read/writeTimeout)
+//	  <= ドレイン猶予 (defaultShutdownTimeout)
+//	  <  Cloud Run が SIGKILL するまで (cloudRunTerminationGrace)
+//
+// でなければならない。逆転すると、WriteTimeout の契約では正当なリクエストを
+// ドレインが先に諦めて切ることになり、通常のスケールダウンのたびに
+// エラーログと非ゼロ終了が出る。この関係は TestTimeoutBudget で縛っている。
 const (
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 5 * time.Second
@@ -25,8 +34,7 @@ const (
 	// Cloud Run が SIGTERM のあと SIGKILL するまでの猶予。固定で設定できない。
 	cloudRunTerminationGrace = 10 * time.Second
 
-	// Cloud Run は SIGTERM の 10 秒後に SIGKILL する。この猶予は固定で設定できない。
-	// 8 秒にして、残り 2 秒を後片付けとプロセス終了に残す。
+	// 上の猶予に対するマージン。残り 2 秒を後片付けとプロセス終了に残す。
 	defaultShutdownTimeout = 8 * time.Second
 )
 
@@ -69,26 +77,26 @@ func main() {
 // Serve を直に呼ぶとそこで流れが止まり、シグナルを待つ余地が無くなる。
 // 「リクエストを捌き続ける」と「シグナルを待つ」を同時にやるために流れを 2 本にする。
 //
-//	main の流れ                       goroutine の流れ
+//	main の流れ                        goroutine の流れ
 //	│
 //	├─ NotifyContext ─► SIGTERM の横取りを開始（stop で解除できる）
 //	│
-//	├─ go func() ──────────────────┐  ← ここで流れが 2 本になる
-//	│                              │
-//	├─ slog.Info("server started") │  srv.Serve(ln) の中で
-//	│                              │  リクエストを捌き続ける
-//	├─ select { どちらが先に来る？ } │
-//	│      │                       │
-//	│      │◄─ SIGTERM 到着 ───────┼─ ctx.Done() が閉じる
-//	│      ▼                       │
-//	├─ stop()  2 回目は即死させる    │
-//	│                              │
-//	├─ srv.Shutdown(shutdownCtx)   │
-//	│    新規接続を止め、処理中を    │
-//	│    待つ（最大 8 秒）──────────┤ Serve が即 ErrServerClosed を返し、
-//	│                              │ errCh に置かれる（バッファ 1 なので
-//	│                              │ 誰も受け取らなくても goroutine は終わる）
-//	├─ return nil                  ✗ goroutine 終了
+//	├─ slog.Info("starting server")
+//	│
+//	├─ go func() ───────────────────┐  ← ここで流れが 2 本になる
+//	│                               │
+//	├─ select { どちらが先に来る？ }  │  srv.Serve(ln) の中で
+//	│      │                        │  リクエストを捌き続ける
+//	│      │◄─ SIGTERM 到着 ────────┼─ ctx.Done() が閉じる
+//	│      ▼                        │
+//	├─ stop()  2 回目は即死させる     │
+//	│                               │
+//	├─ srv.Shutdown(shutdownCtx)    │
+//	│    新規接続を止め、処理中を     │
+//	│    捌き切るまで待つ（最大 8 秒） ┤ Serve が即 ErrServerClosed を返し、
+//	│    Serve の終了も待つ          ✗ errCh に置かれて goroutine 終了
+//	│                                  （バッファ 1 なので送信は詰まらない）
+//	├─ <-errCh で Serve の結果を拾う
 //	│
 //	└─ defer cancel() / defer stop() が実行される
 func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout time.Duration) error {
@@ -109,10 +117,9 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// Serve のエラーを持ち帰るには channel が要る。channel は受け取る側が
 	// 値の到着まで止まる性質を持ち、これが Go における「待つ」の実装方法になる。
 	//
-	// バッファ 1 が効くのは正常終了のとき。Shutdown を呼ぶと Serve は即座に
-	// ErrServerClosed を返すが、そのとき run はもう select を抜けていて誰も
-	// 受け取らない。バッファ 0 だとこの goroutine は送信待ちのまま永久に残る
-	// （= goroutine リーク）。
+	// バッファ 1 にするのは、誰も受け取らない経路があるため。ドレインが超過して
+	// Shutdown がエラーを返すと、run は errCh を読まずに return する。
+	// バッファ 0 だと送信側の goroutine が永久に残る（= goroutine リーク）。
 	errCh := make(chan error, 1)
 
 	slog.Info("starting server", "addr", ln.Addr().String())
