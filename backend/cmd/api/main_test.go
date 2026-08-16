@@ -15,11 +15,9 @@ import (
 // テスト全体で使う待ち時間の上限。これを超えたら「戻ってこない」と判定する。
 const waitLimit = 3 * time.Second
 
-// newListener は 127.0.0.1 の空きポートで待ち受ける listener を返す。
-//
-// ポート 0 を指定して OS に選ばせるので、固定ポートの取り合いで落ちない。
-// listener をテスト側で作れるのは run が net.Listener を引数で受け取るからで、
-// ListenAndServe を直に呼ぶ設計だと実ポートを知る手段がない。
+// newListener はポート 0（= OS が空きを選ぶ）で待ち受ける listener を返す。
+// 固定ポートの取り合いで落ちない。run が net.Listener を受け取る設計なので
+// これができる。ListenAndServe を直に呼ぶ形だと実ポートを知る手段がない。
 func newListener(t *testing.T) net.Listener {
 	t.Helper()
 
@@ -28,15 +26,12 @@ func newListener(t *testing.T) net.Listener {
 		t.Fatalf("listen: %v", err)
 	}
 
-	// Serve が内部で閉じるので普段は不要だが、run に渡る前に抜けるテストでも
-	// 確実に閉じるよう、ヘルパの契約として後始末を持つ。二重 Close は無害。
-	t.Cleanup(func() { _ = ln.Close() })
+	t.Cleanup(func() { _ = ln.Close() }) // 二重 Close は無害
 
 	return ln
 }
 
-// newClient は keep-alive の接続をテスト間に持ち越さないクライアントを返す。
-// http.DefaultClient を使うと接続が他のテストに残る。
+// newClient は keep-alive の接続を他のテストに持ち越さないクライアントを返す。
 func newClient(t *testing.T) *http.Client {
 	t.Helper()
 
@@ -46,15 +41,13 @@ func newClient(t *testing.T) *http.Client {
 	return c
 }
 
-// blockingHandler は「突入を entered で知らせ、release が閉じられるまで応答しない」
-// ハンドラを返す。
+// blockingHandler は突入を entered で知らせ、release が閉じられるまで応答しない。
 //
-// time.Sleep で処理時間を決めないのが要点。sleep で書くと、テスト側の
-// goroutine のスケジューリングが遅れたときにリクエストが先に完走してしまい、
-// 「ドレインを一度も試さないまま全アサーションが通る」偽の緑になる。
-// ハンドラを止めておけば「シャットダウン開始時に処理中である」ことが確定する。
+// time.Sleep で処理時間を決めないのが要点。sleep だとテスト側の goroutine が
+// 遅れたときにリクエストが先に完走し、ドレインを一度も試さないまま全部通る
+// 偽の緑になる。止めておけば「シャットダウン時に処理中」が確定する。
 //
-// ハンドラの中で t.* を呼んではいけない（テスト終了後に走る可能性がある）。
+// ハンドラの中で t.* を呼ばない（テスト終了後に走ることがある）。
 func blockingHandler(entered, release chan struct{}) http.Handler {
 	mark := sync.OnceFunc(func() { close(entered) })
 
@@ -96,12 +89,11 @@ func getAsync(t *testing.T, addr string) <-chan response {
 	return ch
 }
 
-// waitUntilRefused は addr が新規接続を拒否するようになるまで待つ。
-// Shutdown が listener を閉じたことの確認に使う。
+// waitUntilRefused は addr が新規接続を拒否するまで待つ。
+// Shutdown が listener を閉じた証拠として使う。
 //
-// 受理するのは ECONNREFUSED だけ。dial のタイムアウトを「拒否」と見なすと、
-// 負荷の高いマシンで「まだ listen しているのに閉じたと判定する」ことになり、
-// 呼び出し元のテストが前提を確定できないまま緑になる。
+// 受理するのは ECONNREFUSED だけ。dial のタイムアウトを拒否と見なすと、
+// まだ listen しているのに閉じたと判定してしまう。
 func waitUntilRefused(t *testing.T, addr string) {
 	t.Helper()
 
@@ -115,7 +107,7 @@ func waitUntilRefused(t *testing.T, addr string) {
 		case errors.Is(err, syscall.ECONNREFUSED):
 			return
 		default:
-			t.Logf("dial: %v（拒否ではないので再試行する）", err)
+			t.Logf("dial: %v（拒否ではないので再試行）", err)
 		}
 
 		time.Sleep(5 * time.Millisecond)
@@ -139,20 +131,13 @@ func waitForRun(t *testing.T, runErr <-chan error) error {
 }
 
 // TestTimeoutBudget はタイムアウト定数どうしの関係を固定する。
-//
-// **ここで縛れるのは必要条件だけで、「ドレインが必ず間に合う」は保証できない。**
-// http.Server の WriteTimeout はソケットの書き込み期限であって、ハンドラの
-// 実行時間を止めない。DB クエリが長引けば接続は active のままなので、
-// Shutdown はドレイン猶予を使い切って超過しうる。ハンドラ自体を縛るには
-// http.TimeoutHandler が要るが、それはミドルウェアの領域（Phase 1）。
+// ここで縛れるのは必要条件だけ（理由は main.go の定数ブロック）。
 func TestTimeoutBudget(t *testing.T) {
 	t.Parallel()
 
-	// ヘッダとボディで別の予算にする。同値だと ReadHeaderTimeout が実質
-	// 無効になる。net/http は ReadHeaderTimeout が 0 なら ReadTimeout に
-	// フォールバックし（server.go の readHeaderTimeout()）、さらに
-	// 両者が等しいとボディ用の読み取り期限を延長する分岐が死ぬため、
-	// ヘッダだけを短く縛る slowloris 対策が消える。
+	// 同値だと ReadHeaderTimeout が実質無効になる。net/http は 0 のとき
+	// ReadTimeout にフォールバックし、両者が等しいとボディ用の期限を
+	// 延長する分岐も死ぬので、ヘッダだけを短く縛れなくなる。
 	if readHeaderTimeout >= readTimeout {
 		t.Errorf(
 			"readHeaderTimeout %v >= readTimeout %v（ヘッダとボディの予算が分離されていない）",
@@ -160,8 +145,7 @@ func TestTimeoutBudget(t *testing.T) {
 		)
 	}
 
-	// ドレインを諦める時点は、Cloud Run が SIGKILL する前でなければならない。
-	// 後ろだと Shutdown の戻り値を見る前に殺され、ログにも何も残らない。
+	// 後ろだと Shutdown の戻り値を見る前に殺され、ログに何も残らない。
 	if defaultShutdownTimeout >= cloudRunTerminationGrace {
 		t.Errorf(
 			"defaultShutdownTimeout %v >= cloudRunTerminationGrace %v（SIGKILL に間に合わない）",
@@ -170,9 +154,9 @@ func TestTimeoutBudget(t *testing.T) {
 	}
 }
 
-// TestNewServerUsesTimeoutBudget は、定数が実際に http.Server に配線されている
-// ことを検証する。TestTimeoutBudget は定数どうしの関係しか見ないので、
-// WriteTimeout の行を消しても取り違えても、そちらだけでは緑のまま通る。
+// TestNewServerUsesTimeoutBudget は定数が http.Server に配線されていることを
+// 検証する。TestTimeoutBudget は定数どうしの関係しか見ないので、配線を消しても
+// 取り違えても、そちらだけでは緑のまま通る。
 func TestNewServerUsesTimeoutBudget(t *testing.T) {
 	t.Parallel()
 
@@ -237,9 +221,8 @@ func TestRunDrainsInFlightRequests(t *testing.T) {
 	// ② SIGTERM 相当
 	cancel()
 
-	// ③ 新規接続が拒否されるまで待つ = Shutdown が listener を閉じた証拠。
-	//    ここまで来てもハンドラはまだ止まっているので、
-	//    「シャットダウン中に処理中のリクエストが存在する」状態が確定する。
+	// ③ 新規接続が拒否される = Shutdown が listener を閉じた。
+	//    ハンドラはまだ止めたままなので「シャットダウン中に処理中」が確定する。
 	waitUntilRefused(t, addr)
 
 	// ④ ここで初めてハンドラを解放する
@@ -261,8 +244,8 @@ func TestRunDrainsInFlightRequests(t *testing.T) {
 		t.Fatal("レスポンスが返らなかった")
 	}
 
-	// ⑥ run が nil を返すこと = main が slog.Error を呼ばないこと。
-	//    受け入れ条件「SIGTERM で終了するときエラーログを出さない」はここで担保する。
+	// ⑥ nil = main が slog.Error を呼ばない。
+	//    受け入れ条件「SIGTERM で終了するときエラーログを出さない」の担保。
 	if err := waitForRun(t, runErr); err != nil {
 		t.Errorf("run() = %v, want nil（正常終了ではエラーログを出さない）", err)
 	}
@@ -270,9 +253,7 @@ func TestRunDrainsInFlightRequests(t *testing.T) {
 
 // TestRunClosesConnectionsWhenDrainTimesOut は、猶予内に捌き切れなかったとき
 // (1) それが戻り値に出ること (2) 残った接続が強制切断されることを検証する。
-//
-// http.Server.Shutdown は ctx が期限切れになっても ctx.Err() を返すだけで、
-// 処理中の接続は閉じない。Close を呼ばないと接続と goroutine が残り続ける。
+// Shutdown は ctx が切れても ctx.Err() を返すだけで接続を閉じない。
 func TestRunClosesConnectionsWhenDrainTimesOut(t *testing.T) {
 	t.Parallel()
 
@@ -310,8 +291,7 @@ func TestRunClosesConnectionsWhenDrainTimesOut(t *testing.T) {
 		t.Errorf("run() = %v, want context.DeadlineExceeded を含むエラー", err)
 	}
 
-	// (2) 残った接続が強制切断される。Close を呼ばないとクライアントは
-	//     ハンドラが解放されるまで待ち続け、ここがタイムアウトする。
+	// (2) 残った接続が強制切断される。Close が無ければここがタイムアウトする。
 	select {
 	case res := <-resCh:
 		if res.err == nil {
@@ -323,14 +303,12 @@ func TestRunClosesConnectionsWhenDrainTimesOut(t *testing.T) {
 }
 
 // errAcceptBoom は failAfterListener が意図的に返す恒久エラー。
-// net/http は一時エラーだと Accept をリトライするので、Temporary() を
-// 持たないただの error にして必ず Serve を戻す。
+// net/http は一時エラーだと Accept をリトライするので Temporary() を持たせない。
 var errAcceptBoom = errors.New("accept boom")
 
-// failAfterListener は fail が閉じられたあとの Accept を恒久エラーにする listener。
-//
-// Accept は本物の listener で待ち受けているので、止めるには fail を閉じたうえで
-// 下位の listener も閉じて叩き起こす必要がある。failNow がその 2 つをまとめる。
+// failAfterListener は fail が閉じられたあとの Accept を恒久エラーにする。
+// Accept は本物の listener で待っているので、止めるには fail を閉じたうえで
+// 下位の listener も閉じて叩き起こす必要がある（failNow がまとめる）。
 type failAfterListener struct {
 	net.Listener
 
@@ -362,12 +340,9 @@ func (l *failAfterListener) failNow() {
 	_ = l.Close()
 }
 
-// TestRunDrainsWhenServeFails は、accept ループが死んだときでも受理済みの
-// リクエストを捌き切ってから戻ることを検証する。
-//
-// accept が失敗したことは、既に受理済みの接続の健全性とは無関係。ここで
-// いきなり srv.Close() すると、ドレイン猶予を 1 秒も使わないまま処理中の
-// リクエストを全部切ることになり、この issue の目的と矛盾する。
+// TestRunDrainsWhenServeFails は、accept ループが死んでも受理済みのリクエストを
+// 捌き切ってから戻ることを検証する。accept の失敗は受理済み接続の健全性と
+// 無関係なので、ここで即 Close するとドレイン猶予を使わずに全部切ってしまう。
 func TestRunDrainsWhenServeFails(t *testing.T) {
 	t.Parallel()
 
@@ -398,7 +373,7 @@ func TestRunDrainsWhenServeFails(t *testing.T) {
 	// accept ループを殺す
 	ln.failNow()
 
-	// 処理中のリクエストが残っている間、run は戻ってはいけない
+	// 処理中が残っている間は戻ってはいけない
 	select {
 	case err := <-runErr:
 		t.Fatalf("処理中のリクエストを捌かずに戻った: %v", err)
