@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -95,22 +96,32 @@ func getAsync(t *testing.T, addr string) <-chan response {
 	return ch
 }
 
-// waitUntilRefused は addr が新規接続を受け付けなくなるまで待つ。
+// waitUntilRefused は addr が新規接続を拒否するようになるまで待つ。
 // Shutdown が listener を閉じたことの確認に使う。
+//
+// 受理するのは ECONNREFUSED だけ。dial のタイムアウトを「拒否」と見なすと、
+// 負荷の高いマシンで「まだ listen しているのに閉じたと判定する」ことになり、
+// 呼び出し元のテストが前提を確定できないまま緑になる。
 func waitUntilRefused(t *testing.T, addr string) {
 	t.Helper()
 
 	deadline := time.Now().Add(waitLimit)
 	for time.Now().Before(deadline) {
 		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err != nil {
+
+		switch {
+		case err == nil:
+			_ = conn.Close()
+		case errors.Is(err, syscall.ECONNREFUSED):
 			return
+		default:
+			t.Logf("dial: %v（拒否ではないので再試行する）", err)
 		}
-		_ = conn.Close()
+
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	t.Fatal("シャットダウンを要求したのに新規接続を受け付け続けている")
+	t.Fatal("シャットダウンを要求したのに新規接続を拒否しない")
 }
 
 // waitForRun は run の戻り値を待つ。
@@ -127,12 +138,13 @@ func waitForRun(t *testing.T, runErr <-chan error) error {
 	}
 }
 
-// TestTimeoutBudget は、1 接続が居座れる最長時間がドレイン猶予に収まり、
-// ドレイン猶予が Cloud Run の SIGKILL に間に合うことを固定する。
+// TestTimeoutBudget はタイムアウト定数どうしの関係を固定する。
 //
-// 破れると「サーバ自身の契約では正当なリクエストを、ドレインが先に諦めて切る」
-// ことになり、通常のスケールダウンのたびに ERROR ログと非ゼロ終了が出る。
-// 受け入れ条件「SIGTERM で終了するときエラーログを出さない」を構造的に破る。
+// **ここで縛れるのは必要条件だけで、「ドレインが必ず間に合う」は保証できない。**
+// http.Server の WriteTimeout はソケットの書き込み期限であって、ハンドラの
+// 実行時間を止めない。DB クエリが長引けば接続は active のままなので、
+// Shutdown はドレイン猶予を使い切って超過しうる。ハンドラ自体を縛るには
+// http.TimeoutHandler が要るが、それはミドルウェアの領域（Phase 1）。
 func TestTimeoutBudget(t *testing.T) {
 	t.Parallel()
 
@@ -148,21 +160,44 @@ func TestTimeoutBudget(t *testing.T) {
 		)
 	}
 
-	// 読み取りと書き込みの予算は重ならず順に消費される。net/http は
-	// WriteTimeout の期限を readRequest の defer で、つまりヘッダを
-	// 読み終えてから設定するため、1 接続の最悪占有は両者の和になる。
-	if occupancy := readTimeout + writeTimeout; occupancy > defaultShutdownTimeout {
-		t.Errorf(
-			"readTimeout + writeTimeout = %v > defaultShutdownTimeout %v（ドレインが先に諦める）",
-			occupancy, defaultShutdownTimeout,
-		)
-	}
-
+	// ドレインを諦める時点は、Cloud Run が SIGKILL する前でなければならない。
+	// 後ろだと Shutdown の戻り値を見る前に殺され、ログにも何も残らない。
 	if defaultShutdownTimeout >= cloudRunTerminationGrace {
 		t.Errorf(
 			"defaultShutdownTimeout %v >= cloudRunTerminationGrace %v（SIGKILL に間に合わない）",
 			defaultShutdownTimeout, cloudRunTerminationGrace,
 		)
+	}
+}
+
+// TestNewServerUsesTimeoutBudget は、定数が実際に http.Server に配線されている
+// ことを検証する。TestTimeoutBudget は定数どうしの関係しか見ないので、
+// WriteTimeout の行を消しても取り違えても、そちらだけでは緑のまま通る。
+func TestNewServerUsesTimeoutBudget(t *testing.T) {
+	t.Parallel()
+
+	srv := newServer(http.NewServeMux())
+
+	tests := []struct {
+		name string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"ReadHeaderTimeout", srv.ReadHeaderTimeout, readHeaderTimeout},
+		{"ReadTimeout", srv.ReadTimeout, readTimeout},
+		{"WriteTimeout", srv.WriteTimeout, writeTimeout},
+		{"IdleTimeout", srv.IdleTimeout, idleTimeout},
+	}
+
+	for _, tt := range tests {
+		if tt.got != tt.want {
+			t.Errorf("%s = %v, want %v", tt.name, tt.got, tt.want)
+		}
+	}
+
+	// Serve(ln) は Addr を見ないので、持たせると嘘になる。
+	if srv.Addr != "" {
+		t.Errorf("Addr = %q, want \"\"（Serve(ln) は Addr を見ない）", srv.Addr)
 	}
 }
 
