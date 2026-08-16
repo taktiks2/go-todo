@@ -34,9 +34,9 @@ import (
 // ことになり、通常のスケールダウンのたびにエラーログと非ゼロ終了が出る。
 // この関係は TestTimeoutBudget で縛っている。
 const (
-	readHeaderTimeout = 2 * time.Second
-	readTimeout       = 3 * time.Second
-	writeTimeout      = 5 * time.Second
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 10 * time.Second
+	writeTimeout      = 10 * time.Second
 	idleTimeout       = 60 * time.Second
 
 	// Cloud Run が SIGTERM のあと SIGKILL するまでの猶予。固定で設定できない。
@@ -55,14 +55,7 @@ func main() {
 
 	h := httpapi.NewHandler()
 
-	srv := &http.Server{
-		// Addr は設定しない。Serve(ln) は見ないので、持たせると嘘になる。
-		Handler:           h.Routes(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
-	}
+	srv := newServer(h.Routes())
 
 	// listen を main が持つと、bind 失敗を起動時に切り分けられる。
 	// Cloud Run が注入した PORT に bind できない事故はここで死ぬ。
@@ -165,12 +158,11 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// 「シグナルが来た」という事実さえ取れれば十分だから。
 	case <-ctx.Done():
 		slog.Info("shutting down", "cause", context.Cause(ctx))
-
-		// ここで stop() を呼ぶと既定動作に戻り、2 回目の SIGTERM / Ctrl-C で即死する。
-		// 呼ばないと 2 回目以降も横取りされ続け、ドレインが詰まったとき運用者が
-		// もう一度押しても何も起きない。CancelFunc は冪等なので defer と二重でよい。
-		stop()
 	}
+
+	// どちらの経路でも横取りをやめる。ドレイン中に 2 回目の SIGTERM / Ctrl-C を
+	// 押したら既定動作で即死できるようにするため、select の外に置く。
+	stop()
 
 	// 親は Background。ctx から派生させると既にキャンセル済みなので、
 	// Shutdown が即座に諦めて 1 リクエストも捌かない。
@@ -205,6 +197,16 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// accept ループが死んだこととドレインが超過したことは独立した事実なので、
 	// 優先順位を付けて片方を捨てず両方返す。errors.Join は全部 nil なら nil。
 	return errors.Join(serveError(serveErr), shutdownErr)
+}
+
+func newServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 }
 
 // serveError は Serve の戻り値を run の戻り値に変換する。
