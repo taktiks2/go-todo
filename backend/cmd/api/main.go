@@ -26,8 +26,8 @@ import (
 // ドレインが先に諦めて切ることになり、通常のスケールダウンのたびに
 // エラーログと非ゼロ終了が出る。この関係は TestTimeoutBudget で縛っている。
 const (
-	readHeaderTimeout = 5 * time.Second
-	readTimeout       = 5 * time.Second
+	readHeaderTimeout = 2 * time.Second
+	readTimeout       = 3 * time.Second
 	writeTimeout      = 5 * time.Second
 	idleTimeout       = 60 * time.Second
 
@@ -129,65 +129,61 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// 中では srv.Serve(ln) がサーバの寿命ぶん止まり、戻ってきて初めて errCh <- が動く。
 	go func() { errCh <- srv.Serve(ln) }()
 
+	var (
+		serveErr error
+		served   bool
+	)
+
 	// select は複数の channel 操作を並べ、最初に準備できた 1 つだけを実行する。
 	// switch が「値を比べる」のに対し、select は「channel が動くのを待つ」。
 	// ここで待っている 2 つは、どちらが先に来るか事前には分からない。
 	select {
 	// err := <-errCh は「errCh から取り出して err に入れる」。矢印の向きが受信を表す。
 	// Shutdown を呼ぶ前に Serve が戻った = 異常（bind 済みの listener が閉じたなど）。
-	case err := <-errCh:
-		return serveError(srv, err)
+	case serveErr = <-errCh:
+		served = true
 
 	// ctx.Done() はキャンセル時に閉じられる channel を返す。閉じた channel からの
 	// 受信は即座に成功するので、これは「キャンセルされるまで待つ」という意味になる。
 	// 値に意味は無いので受け取り先を書かない。本体が空なのは意図的で、
 	// 「シグナルが来た」という事実さえ取れれば十分だから。
 	case <-ctx.Done():
+		slog.Info("shutting down", "cause", context.Cause(ctx))
+
+		// ここで stop() を呼ぶと既定動作に戻り、2 回目の SIGTERM / Ctrl-C で即死する。
+		// 呼ばないと 2 回目以降も横取りされ続け、ドレインが詰まったとき運用者が
+		// もう一度押しても何も起きない。CancelFunc は冪等なので defer と二重でよい。
+		stop()
 	}
-
-	slog.Info("shutting down", "cause", context.Cause(ctx))
-
-	// ここで stop() を呼ぶと既定動作に戻り、2 回目の SIGTERM / Ctrl-C で即死する。
-	// 呼ばないと 2 回目以降も横取りされ続け、ドレインが詰まったとき運用者が
-	// もう一度押しても何も起きない。CancelFunc は冪等なので defer と二重でよい。
-	stop()
 
 	// 親は Background。ctx から派生させると既にキャンセル済みなので、
 	// Shutdown が即座に諦めて 1 リクエストも捌かない。
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
 		// Shutdown は ctx が切れても処理中の接続を閉じない。強制切断する。
 		_ = srv.Close()
 
-		return fmt.Errorf("shutdown: %w", err)
+		shutdownErr = fmt.Errorf("shutdown: %w", shutdownErr)
 	}
 
-	// select は ready な case を無作為に選ぶ（Go の仕様）。errCh と ctx.Done() が
-	// 同時に ready なら ctx.Done() が選ばれることがあり、その裏で Serve が実エラーで
-	// 落ちていると、値は errCh に残ったまま二度と読まれず exit 0 で終わってしまう。
-	// ここで拾い直す。
-	//
-	// この受信がブロックしないことは Shutdown が保証する。Shutdown は内部で
-	// listenerGroup.Wait() を呼び、Serve が戻るまで待ってから返るため、
-	// ここに来た時点で errCh には必ず値が入っている。
-	//
-	// なお、この 1 行に対する決定的なテストは書けない。「errCh と ctx.Done() が
-	// 同時に ready」という状態を狙って作れず（select は片方が ready になった
-	// 瞬間に起きる）、Shutdown 後に失敗させても net/http が Accept のエラーを
-	// 一律 ErrServerClosed に置き換えるため、実エラーを観測できないため。
-	return serveError(srv, <-errCh)
+	if !served {
+		// select は ready な case を無作為に選ぶ（Go の仕様）。ctx.Done() が
+		// 選ばれた裏で Serve が実エラーで落ちていることがあるので拾い直す。
+		serveErr = <-errCh
+	}
+
+	return errors.Join(serveError(serveErr), shutdownErr)
 }
 
 // serveError は Serve の戻り値を run の戻り値に変換する。
 // ErrServerClosed は正常終了なので nil、それ以外は接続を閉じてから返す。
-func serveError(srv *http.Server, err error) error {
+func serveError(err error) error {
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
-
-	_ = srv.Close()
 
 	return fmt.Errorf("serve: %w", err)
 }
