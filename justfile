@@ -11,15 +11,20 @@ default:
 dev:
     go run ./cmd/api
 
-# `go run` は SIGTERM を子プロセスに転送しない（このリポジトリで実測）。
-# 構成は just -> go run -> バイナリ の 3 段で、シェルの `kill -TERM %1` は
-# 先頭の just にしか届かず、go run も転送しないため、バイナリは何も受け取らない。
-# さらに just / go run が死んでもバイナリは孤児（PPID 1）として生き残り、
-# ポートを掴み続けるので、次の起動が「address already in use」で失敗する。
+# `go run` はビルドしたバイナリを別プロセスとして起動し、SIGTERM を転送しない
+# （このリポジトリで実測）。構成は just -> go run -> バイナリ の 3 段になる。
+#
+# この 3 段が問題になるかはシェルによる。bash / zsh の `kill %1` はジョブの
+# プロセスグループ全体に送るのでバイナリにも届くが、fish の `%1` は先頭
+# プロセス（just）の PID にしか送らないため、go run が転送しない以上
+# バイナリは何も受け取らない。この環境は fish なので後者になる。
+#
+# どちらのシェルでも、just / go run が先に死ぬとバイナリは孤児（PPID 1）として
+# 生き残り、ポートを掴み続ける。次の起動が「address already in use」で失敗する。
 #
 # そのため、グレースフルシャットダウン（docs/DESIGN.md §9）を手で確かめるときは
 # go run を挟まないこのレシピを使う。just -> バイナリ の 2 段になり、just は
-# go run と違って子プロセスにシグナルを伝えるので、バイナリまで届く。
+# go run と違って子プロセスにシグナルを伝えるので、fish でもバイナリまで届く。
 # 本番の Cloud Run は ENTRYPOINT ["/app"] でバイナリが PID 1 なので、
 # この中継の問題はそもそも存在しない。
 #
@@ -43,10 +48,15 @@ dev:
 serve:
     mkdir -p ../.gobin && go build -o ../.gobin/api ./cmd/api && ../.gobin/api
 
-# テストを実行する
+# -race を既定にする。cmd/api の run() は goroutine + channel + signal +
+# Shutdown の組み合わせで、テストも実 TCP を張って複数 goroutine で走るため、
+# データ競合を検出できないまま緑になる状態を残したくない。
+# CI（CONTRIBUTING.md §7）も同じコマンドを使う。
+
+# テストを実行する（-race 付き）
 [working-directory('backend')]
 test:
-    go test ./...
+    go test -race ./...
 
 # 静的解析をかける
 [working-directory('backend')]

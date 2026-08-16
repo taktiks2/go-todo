@@ -398,8 +398,20 @@ Cloud Run はインスタンス停止時に **SIGTERM を送り、10 秒後に S
 `main()` は薄く保ち、本体をテストできる `run()` に寄せる（#3 で確定）。
 
 ```go
-// Cloud Run の 10 秒に対するマージン。残り 2 秒を後片付けとプロセス終了に残す。
-const defaultShutdownTimeout = 8 * time.Second
+// タイムアウトの予算。短い順に
+//
+//     ハンドラに許す時間 <= ドレイン猶予 < Cloud Run が SIGKILL するまで
+//
+// でなければならない。逆転すると、WriteTimeout の契約では正当なリクエストを
+// ドレインが先に諦めて切ることになり、通常のスケールダウンのたびに
+// エラーログと非ゼロ終了が出る。
+const (
+    readTimeout  = 5 * time.Second
+    writeTimeout = 5 * time.Second
+
+    cloudRunTerminationGrace = 10 * time.Second // 固定。設定できない
+    defaultShutdownTimeout   = 8 * time.Second  // 残り 2 秒を後片付けに残す
+)
 
 func main() {
     // ... config.Load() / httpapi.NewHandler() / http.Server の組み立て
@@ -422,18 +434,20 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
     ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
     defer stop()
 
-    errCh := make(chan error, 1)
-    go func() { errCh <- srv.Serve(ln) }()
+    // Phase 2 では defer pool.Close() をここに置く。どの経路で抜けても
+    // 通るようにするため、Shutdown の後ではなく defer にする。
+    // 「Shutdown が戻った時点で処理中のリクエストは DB を使い終わっている」
+    // 順序は、defer が run の最後に走ることで保たれる。
 
-    slog.Info("server started", "addr", ln.Addr().String())
+    errCh := make(chan error, 1)
+
+    slog.Info("starting server", "addr", ln.Addr().String())
+
+    go func() { errCh <- srv.Serve(ln) }()
 
     select {
     case err := <-errCh: // Shutdown を呼ぶ前に落ちた = 異常
-        if errors.Is(err, http.ErrServerClosed) {
-            return nil
-        }
-
-        return fmt.Errorf("serve: %w", err)
+        return serveError(srv, err)
     case <-ctx.Done():
     }
 
@@ -444,22 +458,38 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
     defer cancel()
 
     if err := srv.Shutdown(shutdownCtx); err != nil {
+        // Shutdown は ctx が切れても処理中の接続を閉じない。強制切断する。
+        _ = srv.Close()
+
         return fmt.Errorf("shutdown: %w", err)
     }
 
-    // Phase 2 では pool.Close() をここに置く。Shutdown が戻った時点で
-    // 処理中のリクエストは DB を使い終わっている、という順序が要る。
-    return nil
+    // select が ctx.Done() を選んだ裏で Serve が失敗していた場合に拾い直す。
+    // Shutdown が listenerGroup.Wait() で Serve の終了を待つので、ブロックしない。
+    return serveError(srv, <-errCh)
+}
+
+// serveError は Serve の戻り値を run の戻り値に変換する。
+func serveError(srv *http.Server, err error) error {
+    if err == nil || errors.Is(err, http.ErrServerClosed) {
+        return nil
+    }
+
+    _ = srv.Close()
+
+    return fmt.Errorf("serve: %w", err)
 }
 ```
 
-この形が抱えている判断は 5 つ。
+この形が抱えている判断は 7 つ。
 
 - **`net.Listener` を `main` が作る。** `ListenAndServe` は `:0` で待ち受けても実ポートを教えてくれず、実 TCP を張るテストが固定ポート頼みになって flaky になる。listener を注入すれば `127.0.0.1:0` でテストでき、同時に bind 失敗を起動時に切り分けられる
 - **`signal.NotifyContext` を `run` の中に置く。** 呼び出し側は親 `ctx` を渡すだけでよく、テストは `cancel()` でシグナルと同じ経路を通せる
 - **`<-ctx.Done()` の直後に `stop()` を呼ぶ。** `NotifyContext` は `stop()` を呼ぶまで 2 回目の SIGTERM / Ctrl-C を食い止める。呼ばないと、ドレインが詰まったときオペレータが 2 回目を押しても効かず SIGKILL を待つしかない
 - **`srv.Shutdown` の戻り値を捨てない。** ctx が期限切れなら `Shutdown` は ctx のエラーを返す。それは「猶予内に捌き切れずリクエストを切った」という事実そのもので、捨てると本番で断続的に接続が切れていても気づけない
 - **シャットダウン用 ctx の親は `context.Background()`。** `ctx` から派生させると既にキャンセル済みなので `Shutdown` が即座に諦め、1 リクエストも捌かない
+- **`Shutdown` が失敗したら `srv.Close()` を呼ぶ。** `Shutdown` は ctx が期限切れになっても `ctx.Err()` を返すだけで、**処理中の接続は閉じない**（閉じるのは listener とアイドル接続だけ）。呼ばないと接続とハンドラの goroutine が解放されない
+- **タイムアウトの予算を逆転させない。** `WriteTimeout` がドレイン猶予より長いと、その契約では正当なリクエストをドレインが先に諦めて切ることになり、**通常のスケールダウンのたびに**エラーログと非ゼロ終了が出る。`ハンドラに許す時間 <= ドレイン猶予 < Cloud Run の 10 秒` を保つ
 
 `context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラー（SIGTERM なら `terminated signal received`）を入れる。Cloud Run のスケールダウンかローカルの Ctrl-C かがログで区別できる。**ただし戻りは wrap されていないため `errors.Is(..., context.Canceled)` は false になる。ログ専用に使い、判定には使わない。**
 

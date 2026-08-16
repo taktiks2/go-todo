@@ -641,40 +641,37 @@ just lint
 
 **これが最重要。** テストが緑でも実際は動かないケース、およびテスト自体の誤りを捕まえる唯一の手段（`CONTRIBUTING.md:190`）。
 
-```bash
-just dev &
+**`just dev` は使えない。** `go run` は SIGTERM を子のバイナリに転送せず、fish の `kill -TERM %1` は
+先頭プロセス（`just`）にしか送らないため、`just dev` 経由ではシグナルがバイナリに一度も届かない
+（実測）。`go run` を挟まない `just serve` を使う。
+
+```fish
+just serve &
+sleep 1
 curl -s localhost:8080/healthz
 kill -TERM %1
 ```
 
-Expected:
+Expected（実測）:
 
 ```
+mkdir -p ../.gobin && go build -o ../.gobin/api ./cmd/api && ../.gobin/api
+2026/08/16 14:10:29 INFO server started addr=[::]:8080
 {"status":"ok"}
+2026/08/16 14:10:30 INFO shutting down cause="terminated signal received"
+error: interrupted by SIGTERM
 ```
 
-そして `kill -TERM` の後に以下が出て、**`level=ERROR` を一切出さずに終了する**。
+見るのは **`ERROR` を含む行が 1 つも無いこと**と、`cause` にシグナル名が出ていること
+（Go 1.26 の `context.Cause`）。`terminated` は `syscall.SIGTERM.String()` で、
+Ctrl-C なら `interrupt signal received` になる。
 
-```
-time=... level=INFO msg="shutting down" cause="terminated signal received"
-```
+**ログ形式に注意。** `slog.SetDefault` を呼んでいないので既定ハンドラ（標準 `log` 経由）が使われ、
+出力は `2026/08/16 14:10:30 INFO shutting down cause="..."` の形になる。
+`time=` / `level=` / `msg=` 形式は `slog.TextHandler` を明示したときのもので、まだ使っていない。
+**`level=ERROR` を grep しても何も引っかからない**（JSON 化は #13）。
 
-`cause` にシグナル名が出ていることも見る（Go 1.26 の `context.Cause`）。
-`terminated` は `syscall.SIGTERM.String()`。Ctrl-C で止めた場合は `interrupt signal received` になる。
-
-**ログが出ずに即死したら、間に挟まっているプロセスを疑う。** `just dev` は `just` → `go run` → バイナリ
-の 3 段になっており、シグナルがバイナリまで届いているかがこの構成に依存する。切り分けは、
-中間層を外して直接バイナリを叩く:
-
-```bash
-nix develop --command sh -c 'cd backend && go build -o /tmp/go-todo-api ./cmd/api'
-/tmp/go-todo-api &
-curl -s localhost:8080/healthz
-kill -TERM %1
-```
-
-これで正常終了するなら実装は正しく、`just dev` 側の中継の話（本番の Cloud Run は
-`ENTRYPOINT ["/app"]` でバイナリが PID 1 なので、この中継は存在しない）。
+最後の `error: interrupted by SIGTERM` は `just` 自身の報告であって、アプリのログではない。
 
 なお `/healthz` は即座に返るのでドレインすべきものが無い。**「捌き切ってから終了する」を実際に
 確かめているのは Task 1 の自動テストであり、この手動確認が見ているのは「シグナルが届き、
@@ -715,7 +712,8 @@ in-flight が完了することをテストで検証している。
 ## 動作確認
 
 ```
-$ just dev &
+$ just serve &
+$ sleep 1
 $ curl -s localhost:8080/healthz
 {"status":"ok"}
 
@@ -738,9 +736,9 @@ $ kill -TERM %1
 
 ## 完了条件
 
-- [ ] `just test` が緑。`cmd/api` に 3 本のテストが増えている
+- [ ] `just test`（`-race` 付き）が緑。`cmd/api` に 4 本のテストが増えている
 - [ ] `just lint` が緑
-- [ ] `kill -TERM` で `level=ERROR` を出さずに終了する
+- [ ] `just serve` に `kill -TERM` して、`ERROR` を含む行を出さずに終了する
 - [ ] `docs/DESIGN.md` §9 が実装と一致している
 - [ ] PR がマージされ、issue #3 が閉じている
 - [ ] `gh issue list --label phase:0 --state open` に残るのが #4 #5 #6 #7 #13 だけになっている（Phase 0 の Go 側が閉じた）

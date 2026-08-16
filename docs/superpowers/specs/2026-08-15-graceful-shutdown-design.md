@@ -202,11 +202,16 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 just test          # 緑
 just lint          # 緑
 
-just dev &
+just serve &
+sleep 1
 curl -s localhost:8080/healthz
 kill -TERM %1
 # → "shutting down" が出て、ERROR を出さずに終了する
 ```
+
+**`just dev` ではなく `just serve` を使う。** `go run` は SIGTERM を子のバイナリに転送せず、
+fish の `kill -TERM %1` は先頭プロセス（`just`）にしか送らないため、
+`just dev` 経由ではシグナルがバイナリに一度も届かない（実測）。`justfile` のコメントを参照。
 
 `CONTRIBUTING.md` §6 の 3 つのゲート（CI 緑 / `/code-review` / 手動確認）をすべて通してからマージする。
 
