@@ -434,10 +434,6 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
     ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
     defer stop()
 
-    // Phase 2 では defer pool.Close() をここに置く。どの経路で抜けても
-    // 通るようにするため、Shutdown の後ではなく defer にする。
-    // 「Shutdown が戻った時点で処理中のリクエストは DB を使い終わっている」
-    // 順序は、defer が run の最後に走ることで保たれる。
 
     errCh := make(chan error, 1)
 
@@ -445,43 +441,61 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 
     go func() { errCh <- srv.Serve(ln) }()
 
-    select {
-    case err := <-errCh: // Shutdown を呼ぶ前に落ちた = 異常
-        return serveError(srv, err)
-    case <-ctx.Done():
-    }
+    var (
+        serveErr error
+        served   bool
+    )
 
-    slog.Info("shutting down", "cause", context.Cause(ctx))
-    stop() // 2 回目の SIGTERM / Ctrl-C を既定動作に戻す
+    select {
+    case serveErr = <-errCh:
+        // Shutdown を呼ぶ前に accept ループが死んだ = 異常。ただし受理済みの
+        // リクエストは無関係に生きているので、ここでも捌き切ってから返す。
+        served = true
+    case <-ctx.Done():
+        slog.Info("shutting down", "cause", context.Cause(ctx))
+        stop() // 2 回目の SIGTERM / Ctrl-C を既定動作に戻す
+    }
 
     shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
     defer cancel()
 
-    if err := srv.Shutdown(shutdownCtx); err != nil {
+    shutdownErr := srv.Shutdown(shutdownCtx)
+    if shutdownErr != nil {
         // Shutdown は ctx が切れても処理中の接続を閉じない。強制切断する。
         _ = srv.Close()
-
-        return fmt.Errorf("shutdown: %w", err)
     }
 
-    // select が ctx.Done() を選んだ裏で Serve が失敗していた場合に拾い直す。
-    // Shutdown が listenerGroup.Wait() で Serve の終了を待つので、ブロックしない。
-    return serveError(srv, <-errCh)
+    if !served {
+        // select が ctx.Done() を選んだ裏で Serve が失敗していた場合に拾い直す。
+        serveErr = <-errCh
+    }
+
+    // Phase 2 では pool.Close() をここに置く。ハンドラが DB を使い終わっている
+    // ことを保証できるのは Shutdown が成功して戻った経路だけなので、defer には
+    // しない（srv.Close() はハンドラの goroutine を待たない）。
+
+    if err := serveError(serveErr); err != nil {
+        return err
+    }
+
+    if shutdownErr != nil {
+        return fmt.Errorf("shutdown: %w", shutdownErr)
+    }
+
+    return nil
 }
 
 // serveError は Serve の戻り値を run の戻り値に変換する。
-func serveError(srv *http.Server, err error) error {
+func serveError(err error) error {
     if err == nil || errors.Is(err, http.ErrServerClosed) {
         return nil
     }
-
-    _ = srv.Close()
 
     return fmt.Errorf("serve: %w", err)
 }
 ```
 
-この形が抱えている判断は 7 つ。
+この形が抱えている判断は 8 つ。
 
 - **`net.Listener` を `main` が作る。** `ListenAndServe` は `:0` で待ち受けても実ポートを教えてくれず、実 TCP を張るテストが固定ポート頼みになって flaky になる。listener を注入すれば `127.0.0.1:0` でテストでき、同時に bind 失敗を起動時に切り分けられる
 - **`signal.NotifyContext` を `run` の中に置く。** 呼び出し側は親 `ctx` を渡すだけでよく、テストは `cancel()` でシグナルと同じ経路を通せる
@@ -489,9 +503,12 @@ func serveError(srv *http.Server, err error) error {
 - **`srv.Shutdown` の戻り値を捨てない。** ctx が期限切れなら `Shutdown` は ctx のエラーを返す。それは「猶予内に捌き切れずリクエストを切った」という事実そのもので、捨てると本番で断続的に接続が切れていても気づけない
 - **シャットダウン用 ctx の親は `context.Background()`。** `ctx` から派生させると既にキャンセル済みなので `Shutdown` が即座に諦め、1 リクエストも捌かない
 - **`Shutdown` が失敗したら `srv.Close()` を呼ぶ。** `Shutdown` は ctx が期限切れになっても `ctx.Err()` を返すだけで、**処理中の接続は閉じない**（閉じるのは listener とアイドル接続だけ）。呼ばないと接続とハンドラの goroutine が解放されない
-- **タイムアウトの予算を逆転させない。** `WriteTimeout` がドレイン猶予より長いと、その契約では正当なリクエストをドレインが先に諦めて切ることになり、**通常のスケールダウンのたびに**エラーログと非ゼロ終了が出る。`ハンドラに許す時間 <= ドレイン猶予 < Cloud Run の 10 秒` を保つ
+- **`Serve` が失敗しても、いきなり `Close` せずドレインする。** accept ループが死んだことは、既に受理済みの接続の健全性とは無関係。ここで切ると、ドレイン猶予を 1 秒も使わないまま処理中のリクエストを全部落とす
+- **タイムアウトの予算を逆転させない。** 守る関係は 3 つ。`readHeaderTimeout < readTimeout`（ヘッダとボディを分ける。同値だと `ReadHeaderTimeout` は実質無効）、**`readTimeout + writeTimeout <= ドレイン猶予`**、`ドレイン猶予 < Cloud Run の 10 秒`。2 つ目が**和**になるのは、`net/http` が `WriteTimeout` の期限を `readRequest` の `defer` で、つまりヘッダを読み終えてから設定するため。読み書きの予算は重ならず順に消費されるので、1 接続の最悪占有は両者の合計になる。破れると、サーバ自身の契約では正当なリクエストをドレインが先に諦めて切ることになり、**通常のスケールダウンのたびに**エラーログと非ゼロ終了が出る
 
-`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラー（SIGTERM なら `terminated signal received`）を入れる。Cloud Run のスケールダウンかローカルの Ctrl-C かがログで区別できる。**ただし戻りは wrap されていないため `errors.Is(..., context.Canceled)` は false になる。ログ専用に使い、判定には使わない。**
+`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラー（SIGTERM なら `terminated signal received`）を入れる。Cloud Run のスケールダウンかローカルの Ctrl-C かがログで区別できる。
+
+**このエラーは `errors.Is(cause, context.Canceled)` が true になる**（`os/signal` の `signalError` が `Is` を実装している）。つまり「キャンセルされたか」の判定は従来どおり通るが、**逆に「シグナルで落ちたのか、親 ctx のキャンセルなのか」を `errors.Is` では区別できない**。区別したいなら文字列か、`cause != context.Canceled` で見る。
 
 **アプリが PID 1 で SIGTERM を受け取る必要がある。** Dockerfile の `ENTRYPOINT` をシェル形式で書くとシグナルが届かず、この節の実装が丸ごと無意味になる。下の Dockerfile 例が exec 形式なのはそのため。
 

@@ -199,11 +199,16 @@ Claude がテストを書き人間が実装を通す形では、実装のバグ�
 
 | トリガー | 実行内容 |
 |---|---|
-| `pull_request`（`backend/**`） | `go test ./...` / `golangci-lint run` |
+| `pull_request`（`backend/**`） | `go test -race ./...` / `golangci-lint run` |
 | `pull_request`（`web/**`） | `tsc --noEmit` / `vitest` |
 | `push` to `main` | docker build → Artifact Registry → `golang-migrate` → `gcloud run deploy` → Firebase Hosting |
 
 検査は PR、デプロイは main。認証は Workload Identity Federation（SA キー JSON は使わない）。
+
+**`-race` を外さない。** `cmd/api` の `run()` から並行コードが入っており（#3）、
+Phase 1 以降も goroutine を跨ぐコードは増える。データ競合は普通の `go test` では
+検出されず緑のまま通るため、**無人で回る CI こそ付けておく必要がある**。
+ローカルの `just test` も同じコマンドにしてある。
 
 ---
 

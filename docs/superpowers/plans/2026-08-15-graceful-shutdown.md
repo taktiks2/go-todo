@@ -7,6 +7,11 @@
 > したがって subagent-driven-development での全自動実行はできない。**Task 2 で必ず止まる。**
 > ステップは checkbox (`- [ ]`) で追跡する。
 
+> **注記（2026-08-16 追記）:** Task 1 / Task 2 に載っているコードは着手時点のもの。
+> 実装後の `/code-review` 2 周で、タイムアウトの予算・`Serve` 失敗時のドレイン・
+> `context.Cause` の挙動について修正が入っている。**確定した形は
+> `docs/DESIGN.md` §9 と `backend/cmd/api/main.go` を見ること。**
+
 **Goal:** SIGTERM を受けたら、処理中のリクエストを捌き切ってから終了する。テストでそれを証明する。
 
 **Architecture:** `cmd/api/main.go` に `run(ctx, ln, srv, shutdownTimeout) error` を切り出し、`main()` は「設定読み込み・DI 配線・`net.Listen`・終了コード」だけにする。`run` が `signal.NotifyContext` を自分で張るので、テストは親 ctx を `cancel()` するだけでシグナルと同じ経路を通せる。`net.Listener` を引数で受けることで、テストが `127.0.0.1:0` の実ポートを掴める。
@@ -455,7 +460,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 1. **`context.WithTimeout(context.Background(), ...)`** — 親を `ctx` にするとコンパイルは通り一見動くが、`Shutdown` が即座に諦めて 1 リクエストも捌かない。この issue で唯一「動くけど完全に間違っている」書き方
 2. **`select` が `errCh` を「Done より前」の経路としてのみ使っている** — `Shutdown` を呼ぶと `Serve` は*即座に* `ErrServerClosed` を返す（`net/http` の doc が「プログラムを終了させず `Shutdown` の戻りを待て」と明記）。`errCh` を Done の後にも待つ形にすると、捌き切る前に抜ける
 3. **`stop()` が `defer` と本体の 2 か所にある** — `context.CancelFunc` は冪等。本体側は「2 回目のシグナルを通す」ため、`defer` 側は `Serve` が先に落ちた経路の後片付けのため
-4. **`context.Cause(ctx)`** — Go 1.26 の新挙動。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM か Ctrl-C かがログで区別できる。**戻りは wrap されていないので `errors.Is(..., context.Canceled)` は false。ログ専用に使い、判定には使わない**
+4. **`context.Cause(ctx)`** — Go 1.26 の新挙動。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM か Ctrl-C かがログで区別できる。**`errors.Is(cause, context.Canceled)` は true になる**（`signalError` が `Is` を実装している）ので、`errors.Is` ではシグナル起因かどうかを判別できない
 
 - [ ] **Step 2: 人間が `backend/cmd/api/main.go` を手で書く**
 
@@ -591,7 +596,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 - **`srv.Shutdown` の戻り値を捨てない。** ctx が期限切れなら `Shutdown` は ctx のエラーを返す。それは「猶予内に捌き切れずリクエストを切った」という事実そのもので、捨てると本番で断続的に接続が切れていても気づけない
 - **シャットダウン用 ctx の親は `context.Background()`。** `ctx` から派生させると既にキャンセル済みなので `Shutdown` が即座に諦め、1 リクエストも捌かない
 
-`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM（Cloud Run のスケールダウン）か `os.Interrupt`（ローカルの Ctrl-C）かがログで区別できる。**ただし戻りは wrap されていないため `errors.Is(..., context.Canceled)` は false になる。ログ専用に使い、判定には使わない。**
+`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM（Cloud Run のスケールダウン）か `os.Interrupt`（ローカルの Ctrl-C）かがログで区別できる。**`errors.Is(cause, context.Canceled)` は true**（`os/signal` の `signalError` が `Is` を実装している）なので、`errors.Is` ではシグナル起因かどうかを判別できない。
 
 **アプリが PID 1 で SIGTERM を受け取る必要がある。** Dockerfile の `ENTRYPOINT` をシェル形式で書くとシグナルが届かず、この節の実装が丸ごと無意味になる。下の Dockerfile 例が exec 形式なのはそのため。
 
@@ -641,12 +646,12 @@ just lint
 
 **これが最重要。** テストが緑でも実際は動かないケース、およびテスト自体の誤りを捕まえる唯一の手段（`CONTRIBUTING.md:190`）。
 
-**`just dev` は使えない。** `go run` は SIGTERM を子のバイナリに転送せず、fish の `kill -TERM %1` は
-先頭プロセス（`just`）にしか送らないため、`just dev` 経由ではシグナルがバイナリに一度も届かない
-（実測）。`go run` を挟まない `just serve` を使う。
+**`just dev` は `go run` を使わず、ビルドしたバイナリを `exec` する形にしてある。**
+`go run` は SIGTERM を子のバイナリに転送せず、fish の `kill -TERM %1` は先頭プロセス（`just`）に
+しか送らないため、`go run` を挟むとシグナルがバイナリに一度も届かない（実測）。
 
 ```fish
-just serve &
+just dev &
 sleep 1
 curl -s localhost:8080/healthz
 kill -TERM %1
@@ -655,7 +660,7 @@ kill -TERM %1
 Expected（実測）:
 
 ```
-mkdir -p ../.gobin && go build -o ../.gobin/api ./cmd/api && ../.gobin/api
+mkdir -p ../.gobin && go build -o ../.gobin/api ./cmd/api && exec ../.gobin/api
 2026/08/16 14:10:29 INFO server started addr=[::]:8080
 {"status":"ok"}
 2026/08/16 14:10:30 INFO shutting down cause="terminated signal received"
@@ -712,7 +717,7 @@ in-flight が完了することをテストで検証している。
 ## 動作確認
 
 ```
-$ just serve &
+$ just dev &
 $ sleep 1
 $ curl -s localhost:8080/healthz
 {"status":"ok"}
@@ -738,7 +743,7 @@ $ kill -TERM %1
 
 - [ ] `just test`（`-race` 付き）が緑。`cmd/api` に 4 本のテストが増えている
 - [ ] `just lint` が緑
-- [ ] `just serve` に `kill -TERM` して、`ERROR` を含む行を出さずに終了する
+- [ ] `just dev` に `kill -TERM` して、`ERROR` を含む行を出さずに終了する
 - [ ] `docs/DESIGN.md` §9 が実装と一致している
 - [ ] PR がマージされ、issue #3 が閉じている
 - [ ] `gh issue list --label phase:0 --state open` に残るのが #4 #5 #6 #7 #13 だけになっている（Phase 0 の Go 側が閉じた）
