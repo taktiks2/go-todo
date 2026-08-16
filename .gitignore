@@ -32,3 +32,11 @@ serviceAccountKey.json
 .DS_Store
 .idea/
 .vscode/
+
+# Terraform
+# .terraform.lock.hcl は除外しない。コミットして provider のハッシュを固定する。
+# *.tfvars は「作らない」方針を破ったときの保険（docs/DESIGN.md §9）。
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
