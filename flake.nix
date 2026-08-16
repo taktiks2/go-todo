@@ -21,9 +21,13 @@
           default = pkgs.mkShell {
             name = "go-todo";
 
-            # メジャーを明示して固定する。`pkgs.go` にすると `nix flake update` で
-            # 勝手に 1.27 に上がり、go.mod の go directive と Dockerfile (#4) の
-            # golang:1.26 だけ取り残される。
+            # マイナーを明示して固定する。`pkgs.go` にすると `nix flake update` で
+            # 勝手に 1.27 に上がり、go.mod の go directive と backend/Dockerfile の
+            # golang イメージだけ取り残される。
+            #
+            # 揃えるのはマイナーまで（#4 で改定。docs/DESIGN.md §10）。
+            # パッチは nixpkgs / Docker Hub / go.mod の 3 系統が独立に動くので
+            # 人手では揃わない。下限は go.mod の go directive が保証する。
             packages = with pkgs; [
               go_1_26
               gopls           # 公式 LSP
