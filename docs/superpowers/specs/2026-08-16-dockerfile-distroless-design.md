@@ -264,11 +264,12 @@ docker-run port="9090":
 
 | 箇所 | 変更 |
 |---|---|
-| §9 コンテナのコード例 | `gcr.io/distroless/static:nonroot` → `static-debian13:nonroot`。サフィックス無しは将来 Debian 14 に黙って移る旨を注記 |
-| §9「結果イメージは約 20MB」 | 実測値（約 8MB）に直す |
-| §9 コード例の直後 | **「実物との差分」注記を新設。** クロスコンパイル、BuildKit cache mount、digest ピン、`-trimpath -ldflags`、`GOTOOLCHAIN=local`、`.dockerignore` 許可リスト、`EXPOSE` を書かない理由 |
-| §10「ローカル環境」の本文 / §14「着手時に決めること」の Go のバージョン行 | 上記「バージョン揃えルールの改定」に沿って書き換える。`go.mod` の `go 1.26.0` という記述は実際には `1.26.5` で、#3 の時点で腐っていた |
-| §14「着手時に決めること」の「Docker ランタイム \| colima」行 | Docker Desktop に直す。この環境に colima は入っていない |
+| §9 コンテナのコード例（`:525`） | `gcr.io/distroless/static:nonroot` → `static-debian13:nonroot`。サフィックス無しは将来 Debian 14 に黙って移る旨を注記 |
+| §9「結果イメージは約 20MB」（`:536`） | 実測値（約 8MB）に直す |
+| §9 コード例の直後（`:529` の後） | **「実物との差分」注記を新設。** クロスコンパイル、BuildKit cache mount、digest ピン、`-trimpath -ldflags`、`GOTOOLCHAIN=local`、`.dockerignore` 許可リスト、`EXPOSE` を書かない理由 |
+| §10「ローカル環境」の本文（`:645`）/ §14「着手時に決めること」の Go のバージョン行（`:772`） | 上記「バージョン揃えルールの改定」に沿って書き換える。`go.mod` の `go 1.26.0` という記述は実際には `1.26.5` で、#3 の時点で腐っていた |
+| §10「ローカル環境」の colima 行（`:647`）/ §14「着手時に決めること」の「Docker ランタイム \| colima」行（`:770`） | Docker Desktop に直す。この環境に colima は入っていない。`:647` は testcontainers-go が `DOCKER_HOST` を見る話も含むので、その部分は残す |
+| §14 リスクの Artifact Registry 行（`:759`） | 「distroless イメージ約 20 MB × デプロイ回数で 30〜40 回」の見積もりを実測（約 8MB）で引き直す。**無料枠を使い切るまでのデプロイ回数が倍以上に伸びるので、リスクの評価自体が変わる** |
 
 ## issue #4 本文の更新
 
