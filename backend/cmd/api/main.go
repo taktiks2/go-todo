@@ -16,15 +16,23 @@ import (
 	httpapi "github.com/taktiks2/go-todo/backend/internal/http"
 )
 
-// タイムアウトの予算。短い順に
+// タイムアウトの予算。守るべき関係は 3 つ。
 //
-//	ハンドラに許す時間 (read/writeTimeout)
-//	  <= ドレイン猶予 (defaultShutdownTimeout)
-//	  <  Cloud Run が SIGKILL するまで (cloudRunTerminationGrace)
+//	readHeaderTimeout < readTimeout                        ヘッダとボディを分ける
+//	readTimeout + writeTimeout <= defaultShutdownTimeout   1 接続の最悪占有
+//	defaultShutdownTimeout < cloudRunTerminationGrace      SIGKILL に間に合う
 //
-// でなければならない。逆転すると、WriteTimeout の契約では正当なリクエストを
-// ドレインが先に諦めて切ることになり、通常のスケールダウンのたびに
-// エラーログと非ゼロ終了が出る。この関係は TestTimeoutBudget で縛っている。
+// 2 つ目が「和」になるのは、net/http が WriteTimeout の期限を readRequest の
+// defer で、つまりヘッダを読み終えてから設定するため。読み取りと書き込みの
+// 予算は重ならず順に消費されるので、1 接続の最悪占有は両者の合計になる。
+//
+// 1 つ目が要るのは、両者が同値だと ReadHeaderTimeout が実質無効になるため。
+// net/http は ReadHeaderTimeout が 0 のとき ReadTimeout にフォールバックし、
+// さらに両者が等しいとボディ用の読み取り期限を延長する分岐が死ぬ。
+//
+// 破れると「サーバ自身の契約では正当なリクエストを、ドレインが先に諦めて切る」
+// ことになり、通常のスケールダウンのたびにエラーログと非ゼロ終了が出る。
+// この関係は TestTimeoutBudget で縛っている。
 const (
 	readHeaderTimeout = 2 * time.Second
 	readTimeout       = 3 * time.Second
@@ -87,16 +95,20 @@ func main() {
 //	│                               │
 //	├─ select { どちらが先に来る？ }  │  srv.Serve(ln) の中で
 //	│      │                        │  リクエストを捌き続ける
+//	│      │                        │
 //	│      │◄─ SIGTERM 到着 ────────┼─ ctx.Done() が閉じる
-//	│      ▼                        │
-//	├─ stop()  2 回目は即死させる     │
-//	│                               │
+//	│      │   stop() で 2 回目を通す │
+//	│      │                        │
+//	│      └◄─ accept が死んだ ──────┼─ errCh に実エラーが来る
+//	│      ▼                        │   （こちらでもドレインはする）
 //	├─ srv.Shutdown(shutdownCtx)    │
 //	│    新規接続を止め、処理中を     │
-//	│    捌き切るまで待つ（最大 8 秒） ┤ Serve が即 ErrServerClosed を返し、
-//	│    Serve の終了も待つ          ✗ errCh に置かれて goroutine 終了
+//	│    捌き切るまで待つ（最大 8 秒） ┤ Serve が ErrServerClosed を返し、
+//	│    超過したら srv.Close()      ✗ errCh に置かれて goroutine 終了
 //	│                                  （バッファ 1 なので送信は詰まらない）
-//	├─ <-errCh で Serve の結果を拾う
+//	├─ 未受信なら <-errCh で拾う
+//	│
+//	├─ errors.Join(serve, shutdown) ← 独立した 2 つの事実なので両方返す
 //	│
 //	└─ defer cancel() / defer stop() が実行される
 func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout time.Duration) error {
@@ -117,9 +129,9 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// Serve のエラーを持ち帰るには channel が要る。channel は受け取る側が
 	// 値の到着まで止まる性質を持ち、これが Go における「待つ」の実装方法になる。
 	//
-	// バッファ 1 にするのは、誰も受け取らない経路があるため。ドレインが超過して
-	// Shutdown がエラーを返すと、run は errCh を読まずに return する。
-	// バッファ 0 だと送信側の goroutine が永久に残る（= goroutine リーク）。
+	// バッファ 1 にするのは、送信側を待たせないため。バッファ 0 だと
+	// 受信が来るまで送信側の goroutine が止まり続ける。今の形では必ず
+	// 受信するが、経路が増えたときに気づかず goroutine を残さないための保険。
 	errCh := make(chan error, 1)
 
 	slog.Info("starting server", "addr", ln.Addr().String())
@@ -138,8 +150,12 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// switch が「値を比べる」のに対し、select は「channel が動くのを待つ」。
 	// ここで待っている 2 つは、どちらが先に来るか事前には分からない。
 	select {
-	// err := <-errCh は「errCh から取り出して err に入れる」。矢印の向きが受信を表す。
-	// Shutdown を呼ぶ前に Serve が戻った = 異常（bind 済みの listener が閉じたなど）。
+	// serveErr = <-errCh は「errCh から取り出して serveErr に入れる」。
+	// 矢印の向きが受信を表す。ここで := を使うと case の中に別の変数ができて
+	// 外側の serveErr が nil のままになるので、= でなければならない。
+	//
+	// Shutdown を呼ぶ前に accept ループが死んだ = 異常。ただし受理済みの
+	// リクエストは無関係に生きているので、ここでも捌き切ってから返す。
 	case serveErr = <-errCh:
 		served = true
 
@@ -170,16 +186,29 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	}
 
 	if !served {
-		// select は ready な case を無作為に選ぶ（Go の仕様）。ctx.Done() が
-		// 選ばれた裏で Serve が実エラーで落ちていることがあるので拾い直す。
+		// select は ready な case を無作為に選ぶ（Go の仕様）。errCh と ctx.Done()
+		// が同時に ready なら ctx.Done() が選ばれることがあり、その裏で Serve が
+		// 実エラーで落ちていると値が errCh に残ったままになる。ここで拾い直す。
+		//
+		// この受信は少し待つことがある。Shutdown は listenerGroup.Wait() で
+		// Serve の終了を待つが、net/http は trackListener の解除を l.Close() より
+		// 後に defer 登録するため、LIFO で Wait() が先に解けて errCh への送信が
+		// まだ済んでいないことがある。待ちは有界なので固まりはしない。
+		//
+		// なお、この分岐に対する決定的なテストは書けない。「errCh と ctx.Done()
+		// が同時に ready」という状態を狙って作れず（select は片方が ready に
+		// なった瞬間に起きる）、Shutdown 後に失敗させても net/http が Accept の
+		// エラーを一律 ErrServerClosed に置き換えるため実エラーを観測できない。
 		serveErr = <-errCh
 	}
 
+	// accept ループが死んだこととドレインが超過したことは独立した事実なので、
+	// 優先順位を付けて片方を捨てず両方返す。errors.Join は全部 nil なら nil。
 	return errors.Join(serveError(serveErr), shutdownErr)
 }
 
 // serveError は Serve の戻り値を run の戻り値に変換する。
-// ErrServerClosed は正常終了なので nil、それ以外は接続を閉じてから返す。
+// ErrServerClosed は Shutdown / Close による正常終了なので nil。
 func serveError(err error) error {
 	if err == nil || errors.Is(err, http.ErrServerClosed) {
 		return nil
