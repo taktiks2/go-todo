@@ -5,6 +5,11 @@
 # 「昨日通ったビルドが今日落ちる」が起きる。
 #
 # 更新するとき:  docker buildx imagetools inspect golang:1.26.6-trixie
+#
+# ARG に置くのは、2 つのイメージ参照と更新手順をここ 1 か所に集めるため。
+# ただし FROM 行を読むタイプのツール（Dependabot / docker scout）からは
+# pin が見えなくなる。このリポジトリはまだそれらを使っていないので ARG を採る。
+# 導入するときに FROM 直書きへ戻すか、ARG を追える設定を入れるかを判断する。
 ARG GO_IMAGE=golang:1.26.6-trixie@sha256:ab563819a16cfe5faff0f96a8bb598fbb0e400ab2ac751996e60abcb23b106a3
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian13:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 

@@ -7,6 +7,24 @@
 - 申し送り元: `docs/superpowers/specs/2026-08-15-graceful-shutdown-design.md` の「#4（Dockerfile）への申し送り」
 - 環境: go1.26.5（nix devShell 実測）/ docker CLI 29.4.1 / Docker Desktop
 
+> **注記（実装後に追記）:** この spec は着手時点の設計である。実装後の `/code-review` で
+> いくつかの判断と数値が覆った。**確定した形は `backend/Dockerfile` / `backend/.dockerignore` /
+> `justfile` / `docs/DESIGN.md` §9 を見ること。** 以下は初版のまま残してある。
+>
+> | 初版の記述 | 実際 |
+> |---|---|
+> | cache mount の `id` に `TARGETARCH` を混ぜる（「GOCACHE はアーキごとに別物で共有すると毎回捨てられる」） | **誤り。** Go のビルドキャッシュは内容アドレス方式で GOOS/GOARCH がキーに入るため共存できる。`id` は外した |
+> | `.dockerignore` 許可リストの狙いに「認証情報の混入防止」 | **誇張。** `!internal` はサブツリーごと戻すし、最終イメージにはバイナリしか入らない。実際の狙いは転送量とレイヤキャッシュの安定 |
+> | Artifact Registry は「約 8MB × デプロイ回数で 60 回前後」 | **モデルが誤り。** レジストリは gzip 後のレイヤを digest で重複排除する。実測でアプリ層 2.54MB/デプロイ、base 0.77MB は 1 回だけ。190 回前後 |
+> | サイズ表記（8.44MB / 5.81MB / 7.92MB） | すべて MiB だった。`docker images` に合わせて 10 進 MB に統一（8.85MB / 6.10MB / 8.31MB） |
+> | `docker run --name {{image}}` | コンテナ名は別変数 `container` にした。#5 で `image` が `/` を含むレジストリパスになると `--name` が受け付けない |
+> | `docker-run` に `[working-directory('backend')]` | `docker run` は作業ディレクトリを読まないため外した |
+> | `.dockerignore` の許可リスト | `!db` を追加。`docs/DESIGN.md` §3 の構成にあり、Phase 2 で `go:embed` する可能性がある |
+>
+> `ARG GO_IMAGE` / `ARG RUNTIME_IMAGE` は「未使用の間接参照で `FROM` を読むスキャナから
+> pin が見えない」と指摘されたが、**残す判断をした**（このリポジトリは Dependabot / Renovate を
+> 使っておらず、参照と更新手順が先頭にまとまる利点を採った）。導入時に再判断する。
+
 ## 目的
 
 `CGO_ENABLED=0` の静的リンクバイナリを distroless に載せ、Cloud Run に投げられるイメージを作る。
