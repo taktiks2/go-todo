@@ -2,6 +2,9 @@
 default:
     @just --list
 
+# ローカルのイメージ名。Artifact Registry のパスは #5 で決める。
+image := "go-todo"
+
 # go.mod は backend/ にあるが justfile はルートに置くので、
 # working-directory 属性で寄せる（just 1.38.0 以降）。
 # `cd backend &&` を各行に書かないためのもの。
@@ -63,3 +66,39 @@ lint:
 [working-directory('backend')]
 fmt:
     golangci-lint fmt
+
+# 本番と同じ linux/amd64 のイメージを作る。
+#
+# Cloud Run は x86_64 しか受け付けない（container runtime contract）。
+# --platform を付けないと Apple Silicon では arm64 イメージができ、
+# ローカルでは動くのに Cloud Run で exec format error になる。
+#
+# --platform が指すのは「成果物のアーキ」であって「ビルドの走り方」ではない。
+# Dockerfile が FROM --platform=$BUILDPLATFORM でビルドステージをホストに
+# 固定しているので、Go のコンパイラは arm64 ネイティブで走る。
+#
+# サイズ表示に docker images --format を使わないのは、Go テンプレートの二重波括弧が
+# just の補間構文と衝突するため（just 側のエスケープが要る）。jq は flake.nix にある。
+
+# コンテナイメージをビルドする（linux/amd64）
+[working-directory('backend')]
+docker-build:
+    docker build --platform linux/amd64 -t {{image}} .
+    @docker image inspect {{image}} | jq -r '"image size: \((.[0].Size / 1048576 * 10 | round) / 10) MB"'
+
+# PORT には既定の 8080 ではない値を渡す。8080 のまま検証すると、アプリが PORT を
+# 無視して 8080 をハードコードしていても通ってしまい、issue #4 の完了条件
+# 「コンテナ内で PORT 環境変数が効く」の検証にならない。
+# ホスト側は 8080 に固定するので、確認は素直な curl でよい:
+#
+#   just docker-run &
+#   curl -s localhost:8080/healthz | jq
+#
+# 停止は別シェルから `docker stop go-todo`。docker stop の既定猶予は 10 秒で、
+# Cloud Run の SIGTERM -> SIGKILL の猶予とちょうど同じなので、
+# 本番のシャットダウン契約をそのまま手元で再現できる。
+
+# コンテナを起動する（コンテナ内は PORT、ホストは 8080）
+[working-directory('backend')]
+docker-run port="9090":
+    docker run --rm --name {{image}} -e PORT={{port}} -p 8080:{{port}} {{image}}
