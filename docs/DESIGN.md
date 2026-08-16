@@ -463,6 +463,8 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
     if shutdownErr != nil {
         // Shutdown は ctx が切れても処理中の接続を閉じない。強制切断する。
         _ = srv.Close()
+
+        shutdownErr = fmt.Errorf("shutdown: %w", shutdownErr)
     }
 
     if !served {
@@ -474,15 +476,9 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
     // ことを保証できるのは Shutdown が成功して戻った経路だけなので、defer には
     // しない（srv.Close() はハンドラの goroutine を待たない）。
 
-    if err := serveError(serveErr); err != nil {
-        return err
-    }
-
-    if shutdownErr != nil {
-        return fmt.Errorf("shutdown: %w", shutdownErr)
-    }
-
-    return nil
+    // accept ループが死んだこととドレインが超過したことは独立した事実なので、
+    // どちらかを捨てず両方返す。errors.Join は全部 nil なら nil を返す。
+    return errors.Join(serveError(serveErr), shutdownErr)
 }
 
 // serveError は Serve の戻り値を run の戻り値に変換する。
