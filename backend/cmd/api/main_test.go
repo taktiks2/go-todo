@@ -27,6 +27,10 @@ func newListener(t *testing.T) net.Listener {
 		t.Fatalf("listen: %v", err)
 	}
 
+	// Serve が内部で閉じるので普段は不要だが、run に渡る前に抜けるテストでも
+	// 確実に閉じるよう、ヘルパの契約として後始末を持つ。二重 Close は無害。
+	t.Cleanup(func() { _ = ln.Close() })
+
 	return ln
 }
 
@@ -41,29 +45,129 @@ func newClient(t *testing.T) *http.Client {
 	return c
 }
 
+// blockingHandler は「突入を entered で知らせ、release が閉じられるまで応答しない」
+// ハンドラを返す。
+//
+// time.Sleep で処理時間を決めないのが要点。sleep で書くと、テスト側の
+// goroutine のスケジューリングが遅れたときにリクエストが先に完走してしまい、
+// 「ドレインを一度も試さないまま全アサーションが通る」偽の緑になる。
+// ハンドラを止めておけば「シャットダウン開始時に処理中である」ことが確定する。
+//
+// ハンドラの中で t.* を呼んではいけない（テスト終了後に走る可能性がある）。
+func blockingHandler(entered, release chan struct{}) http.Handler {
+	mark := sync.OnceFunc(func() { close(entered) })
+
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mark()
+		<-release
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "drained")
+	})
+}
+
+// response はクライアント goroutine から本体へ結果を運ぶ。
+type response struct {
+	status int
+	body   string
+	err    error
+}
+
+// getAsync は addr に GET を投げ、結果を channel で返す。
+func getAsync(t *testing.T, addr string) <-chan response {
+	t.Helper()
+
+	client := newClient(t)
+	ch := make(chan response, 1)
+
+	go func() {
+		resp, err := client.Get("http://" + addr + "/")
+		if err != nil {
+			ch <- response{err: err}
+
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+
+		b, err := io.ReadAll(resp.Body)
+		ch <- response{status: resp.StatusCode, body: string(b), err: err}
+	}()
+
+	return ch
+}
+
+// waitUntilRefused は addr が新規接続を受け付けなくなるまで待つ。
+// Shutdown が listener を閉じたことの確認に使う。
+func waitUntilRefused(t *testing.T, addr string) {
+	t.Helper()
+
+	deadline := time.Now().Add(waitLimit)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err != nil {
+			return
+		}
+		_ = conn.Close()
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal("シャットダウンを要求したのに新規接続を受け付け続けている")
+}
+
+// waitForRun は run の戻り値を待つ。
+func waitForRun(t *testing.T, runErr <-chan error) error {
+	t.Helper()
+
+	select {
+	case err := <-runErr:
+		return err
+	case <-time.After(waitLimit):
+		t.Fatal("run() が戻らなかった")
+
+		return nil
+	}
+}
+
+// TestTimeoutBudget は、ハンドラに許す時間・ドレイン猶予・Cloud Run の SIGKILL
+// までの猶予が、この順に短くなっていることを固定する。
+//
+// 逆転すると「WriteTimeout の契約では正当なリクエストを、ドレインが先に
+// 諦めて切る」ことになり、通常のスケールダウンのたびに ERROR ログと
+// 非ゼロ終了が出る。受け入れ条件「SIGTERM で終了するときエラーログを
+// 出さない」を構造的に破るので、定数の関係としてテストで縛る。
+func TestTimeoutBudget(t *testing.T) {
+	t.Parallel()
+
+	if readTimeout > defaultShutdownTimeout {
+		t.Errorf("readTimeout %v > defaultShutdownTimeout %v", readTimeout, defaultShutdownTimeout)
+	}
+
+	if writeTimeout > defaultShutdownTimeout {
+		t.Errorf("writeTimeout %v > defaultShutdownTimeout %v", writeTimeout, defaultShutdownTimeout)
+	}
+
+	if defaultShutdownTimeout >= cloudRunTerminationGrace {
+		t.Errorf(
+			"defaultShutdownTimeout %v >= cloudRunTerminationGrace %v（SIGKILL に間に合わない）",
+			defaultShutdownTimeout, cloudRunTerminationGrace,
+		)
+	}
+}
+
 // TestRunDrainsInFlightRequests は、シャットダウン要求の時点で処理中だった
 // リクエストが切断されず最後まで応答されることを検証する。受け入れ条件の本体。
 func TestRunDrainsInFlightRequests(t *testing.T) {
 	t.Parallel()
 
 	ln := newListener(t)
+	addr := ln.Addr().String()
 
-	// ハンドラは「突入を知らせてから 200ms かけて応答する」。
-	// この 200ms の途中でシャットダウンを要求するのがこのテストの肝。
-	// ハンドラの中で t.* を呼んではいけない（テスト終了後に走る可能性がある）。
-	//
-	// sync.OnceFunc で包むのは、クライアントがリクエストを再送した場合に
-	// 閉じた channel を二度 close して panic するのを防ぐため。
 	entered := make(chan struct{})
-	markEntered := sync.OnceFunc(func() { close(entered) })
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
 
 	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			markEntered()
-			time.Sleep(200 * time.Millisecond)
-			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, "drained")
-		}),
+		Handler:           blockingHandler(entered, release),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -73,38 +177,27 @@ func TestRunDrainsInFlightRequests(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(ctx, ln, srv, 8*time.Second) }()
 
-	type result struct {
-		status int
-		body   string
-		err    error
-	}
+	resCh := getAsync(t, addr)
 
-	client := newClient(t)
-	resCh := make(chan result, 1)
-
-	go func() {
-		resp, err := client.Get("http://" + ln.Addr().String() + "/")
-		if err != nil {
-			resCh <- result{err: err}
-
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-
-		b, err := io.ReadAll(resp.Body)
-		resCh <- result{status: resp.StatusCode, body: string(b), err: err}
-	}()
-
-	// ハンドラに入ったことを確認してから終了を要求する。
-	// time.Sleep で待つと遅いマシンで falsely green になる。
+	// ① ハンドラに入った = リクエストが処理中
 	select {
 	case <-entered:
 	case <-time.After(waitLimit):
 		t.Fatal("ハンドラに到達しなかった")
 	}
 
-	cancel() // SIGTERM 相当
+	// ② SIGTERM 相当
+	cancel()
 
+	// ③ 新規接続が拒否されるまで待つ = Shutdown が listener を閉じた証拠。
+	//    ここまで来てもハンドラはまだ止まっているので、
+	//    「シャットダウン中に処理中のリクエストが存在する」状態が確定する。
+	waitUntilRefused(t, addr)
+
+	// ④ ここで初めてハンドラを解放する
+	releaseOnce()
+
+	// ⑤ 処理中だったリクエストは切断されず完走する
 	select {
 	case res := <-resCh:
 		if res.err != nil {
@@ -120,54 +213,41 @@ func TestRunDrainsInFlightRequests(t *testing.T) {
 		t.Fatal("レスポンスが返らなかった")
 	}
 
-	// run が nil を返すこと = main が slog.Error を呼ばないこと。
-	// 受け入れ条件「SIGTERM で終了するとき、エラーログを出さない」はここで担保する。
-	select {
-	case err := <-runErr:
-		if err != nil {
-			t.Errorf("run() = %v, want nil（正常終了ではエラーログを出さない）", err)
-		}
-	case <-time.After(waitLimit):
-		t.Fatal("run() が戻らなかった")
+	// ⑥ run が nil を返すこと = main が slog.Error を呼ばないこと。
+	//    受け入れ条件「SIGTERM で終了するときエラーログを出さない」はここで担保する。
+	if err := waitForRun(t, runErr); err != nil {
+		t.Errorf("run() = %v, want nil（正常終了ではエラーログを出さない）", err)
 	}
 }
 
-// TestRunReportsDrainTimeout は、猶予内に捌き切れなかったことが run の戻り値に
-// 出ることを検証する。srv.Shutdown の戻り値を捨てると落ちる。
-func TestRunReportsDrainTimeout(t *testing.T) {
+// TestRunClosesConnectionsWhenDrainTimesOut は、猶予内に捌き切れなかったとき
+// (1) それが戻り値に出ること (2) 残った接続が強制切断されることを検証する。
+//
+// http.Server.Shutdown は ctx が期限切れになっても ctx.Err() を返すだけで、
+// 処理中の接続は閉じない。Close を呼ばないと接続と goroutine が残り続ける。
+func TestRunClosesConnectionsWhenDrainTimesOut(t *testing.T) {
 	t.Parallel()
 
 	ln := newListener(t)
+	addr := ln.Addr().String()
 
 	entered := make(chan struct{})
-	markEntered := sync.OnceFunc(func() { close(entered) })
+	release := make(chan struct{})
+	// 解放しないまま進めるので、ドレインは必ず超過する。
+	t.Cleanup(sync.OnceFunc(func() { close(release) }))
 
 	srv := &http.Server{
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			markEntered()
-			time.Sleep(500 * time.Millisecond)
-			w.WriteHeader(http.StatusOK)
-		}),
+		Handler:           blockingHandler(entered, release),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 
-	// ドレインを 20ms しか許さない。ハンドラは 500ms かかるので必ず超過する。
 	runErr := make(chan error, 1)
-	go func() { runErr <- run(ctx, ln, srv, 20*time.Millisecond) }()
+	go func() { runErr <- run(ctx, ln, srv, 50*time.Millisecond) }()
 
-	client := newClient(t)
-
-	go func() {
-		resp, err := client.Get("http://" + ln.Addr().String() + "/")
-		if err != nil {
-			return
-		}
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
+	resCh := getAsync(t, addr)
 
 	select {
 	case <-entered:
@@ -177,14 +257,20 @@ func TestRunReportsDrainTimeout(t *testing.T) {
 
 	cancel()
 
-	// Shutdown の戻り値を捨てると、捌き切れなかった事実が消える。
+	// (1) 捌き切れなかった事実が戻り値に出る
+	if err := waitForRun(t, runErr); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("run() = %v, want context.DeadlineExceeded を含むエラー", err)
+	}
+
+	// (2) 残った接続が強制切断される。Close を呼ばないとクライアントは
+	//     ハンドラが解放されるまで待ち続け、ここがタイムアウトする。
 	select {
-	case err := <-runErr:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Errorf("run() = %v, want context.DeadlineExceeded を含むエラー", err)
+	case res := <-resCh:
+		if res.err == nil {
+			t.Errorf("ドレイン超過なのに接続が閉じられていない: status = %d", res.status)
 		}
 	case <-time.After(waitLimit):
-		t.Fatal("run() が戻らなかった")
+		t.Fatal("ドレイン超過後も接続が開いたまま（srv.Close() が呼ばれていない）")
 	}
 }
 
@@ -207,16 +293,12 @@ func TestRunReportsServeError(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- run(t.Context(), ln, srv, 8*time.Second) }()
 
-	// ErrServerClosed 以外を nil に潰していないことを固定する。
-	select {
-	case err := <-runErr:
-		if err == nil {
-			t.Fatal("run() = nil, want error")
-		}
-		if !errors.Is(err, net.ErrClosed) {
-			t.Errorf("run() = %v, want net.ErrClosed を含むエラー", err)
-		}
-	case <-time.After(waitLimit):
-		t.Fatal("run() が戻らなかった")
+	err := waitForRun(t, runErr)
+	if err == nil {
+		t.Fatal("run() = nil, want error")
+	}
+
+	if !errors.Is(err, net.ErrClosed) {
+		t.Errorf("run() = %v, want net.ErrClosed を含むエラー", err)
 	}
 }
