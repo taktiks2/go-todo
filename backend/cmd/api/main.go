@@ -16,9 +16,19 @@ import (
 	httpapi "github.com/taktiks2/go-todo/backend/internal/http"
 )
 
-// Cloud Run は SIGTERM の 10 秒後に SIGKILL する。この猶予は固定で設定できない。
-// 8 秒にして、残り 2 秒を後片付けとプロセス終了に残す。
-const defaultShutdownTimeout = 8 * time.Second
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 5 * time.Second
+	writeTimeout      = 5 * time.Second
+	idleTimeout       = 60 * time.Second
+
+	// Cloud Run が SIGTERM のあと SIGKILL するまでの猶予。固定で設定できない。
+	cloudRunTerminationGrace = 10 * time.Second
+
+	// Cloud Run は SIGTERM の 10 秒後に SIGKILL する。この猶予は固定で設定できない。
+	// 8 秒にして、残り 2 秒を後片付けとプロセス終了に残す。
+	defaultShutdownTimeout = 8 * time.Second
+)
 
 func main() {
 	cfg, err := config.Load()
@@ -32,10 +42,10 @@ func main() {
 	srv := &http.Server{
 		// Addr は設定しない。Serve(ln) は見ないので、持たせると嘘になる。
 		Handler:           h.Routes(),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	// listen を main が持つと、bind 失敗を起動時に切り分けられる。
@@ -105,12 +115,12 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// （= goroutine リーク）。
 	errCh := make(chan error, 1)
 
+	slog.Info("starting server", "addr", ln.Addr().String())
+
 	// go を付けて呼ぶと別の goroutine で走り始め、呼んだ側は待たずに次の行へ進む。
 	// go は関数呼び出ししか受け取れないので、無名関数を定義してその場で呼ぶ形になる。
 	// 中では srv.Serve(ln) がサーバの寿命ぶん止まり、戻ってきて初めて errCh <- が動く。
 	go func() { errCh <- srv.Serve(ln) }()
-
-	slog.Info("server started", "addr", ln.Addr().String())
 
 	// select は複数の channel 操作を並べ、最初に準備できた 1 つだけを実行する。
 	// switch が「値を比べる」のに対し、select は「channel が動くのを待つ」。
@@ -119,11 +129,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	// err := <-errCh は「errCh から取り出して err に入れる」。矢印の向きが受信を表す。
 	// Shutdown を呼ぶ前に Serve が戻った = 異常（bind 済みの listener が閉じたなど）。
 	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-
-		return fmt.Errorf("serve: %w", err)
+		return serveError(srv, err)
 
 	// ctx.Done() はキャンセル時に閉じられる channel を返す。閉じた channel からの
 	// 受信は即座に成功するので、これは「キャンセルされるまで待つ」という意味になる。
@@ -145,8 +151,36 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
+		// Shutdown は ctx が切れても処理中の接続を閉じない。強制切断する。
+		_ = srv.Close()
+
 		return fmt.Errorf("shutdown: %w", err)
 	}
 
-	return nil
+	// select は ready な case を無作為に選ぶ（Go の仕様）。errCh と ctx.Done() が
+	// 同時に ready なら ctx.Done() が選ばれることがあり、その裏で Serve が実エラーで
+	// 落ちていると、値は errCh に残ったまま二度と読まれず exit 0 で終わってしまう。
+	// ここで拾い直す。
+	//
+	// この受信がブロックしないことは Shutdown が保証する。Shutdown は内部で
+	// listenerGroup.Wait() を呼び、Serve が戻るまで待ってから返るため、
+	// ここに来た時点で errCh には必ず値が入っている。
+	//
+	// なお、この 1 行に対する決定的なテストは書けない。「errCh と ctx.Done() が
+	// 同時に ready」という状態を狙って作れず（select は片方が ready になった
+	// 瞬間に起きる）、Shutdown 後に失敗させても net/http が Accept のエラーを
+	// 一律 ErrServerClosed に置き換えるため、実エラーを観測できないため。
+	return serveError(srv, <-errCh)
+}
+
+// serveError は Serve の戻り値を run の戻り値に変換する。
+// ErrServerClosed は正常終了なので nil、それ以外は接続を閉じてから返す。
+func serveError(srv *http.Server, err error) error {
+	if err == nil || errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+
+	_ = srv.Close()
+
+	return fmt.Errorf("serve: %w", err)
 }
