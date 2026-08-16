@@ -406,8 +406,10 @@ Cloud Run はインスタンス停止時に **SIGTERM を送り、10 秒後に S
 // ドレインが先に諦めて切ることになり、通常のスケールダウンのたびに
 // エラーログと非ゼロ終了が出る。
 const (
-    readTimeout  = 5 * time.Second
-    writeTimeout = 5 * time.Second
+    readHeaderTimeout = 5 * time.Second
+    readTimeout       = 10 * time.Second
+    writeTimeout      = 10 * time.Second
+    idleTimeout       = 60 * time.Second
 
     cloudRunTerminationGrace = 10 * time.Second // 固定。設定できない
     defaultShutdownTimeout   = 8 * time.Second  // 残り 2 秒を後片付けに残す
@@ -500,11 +502,11 @@ func serveError(err error) error {
 - **シャットダウン用 ctx の親は `context.Background()`。** `ctx` から派生させると既にキャンセル済みなので `Shutdown` が即座に諦め、1 リクエストも捌かない
 - **`Shutdown` が失敗したら `srv.Close()` を呼ぶ。** `Shutdown` は ctx が期限切れになっても `ctx.Err()` を返すだけで、**処理中の接続は閉じない**（閉じるのは listener とアイドル接続だけ）。呼ばないと接続とハンドラの goroutine が解放されない
 - **`Serve` が失敗しても、いきなり `Close` せずドレインする。** accept ループが死んだことは、既に受理済みの接続の健全性とは無関係。ここで切ると、ドレイン猶予を 1 秒も使わないまま処理中のリクエストを全部落とす
-- **タイムアウトの予算を逆転させない。** 守る関係は 3 つ。`readHeaderTimeout < readTimeout`（ヘッダとボディを分ける。同値だと `ReadHeaderTimeout` は実質無効）、**`readTimeout + writeTimeout <= ドレイン猶予`**、`ドレイン猶予 < Cloud Run の 10 秒`。2 つ目が**和**になるのは、`net/http` が `WriteTimeout` の期限を `readRequest` の `defer` で、つまりヘッダを読み終えてから設定するため。読み書きの予算は重ならず順に消費されるので、1 接続の最悪占有は両者の合計になる。破れると、サーバ自身の契約では正当なリクエストをドレインが先に諦めて切ることになり、**通常のスケールダウンのたびに**エラーログと非ゼロ終了が出る
+- **タイムアウトの定数で守れるのは必要条件だけ。** `readHeaderTimeout < readTimeout`（ヘッダとボディを分ける。同値だと `ReadHeaderTimeout` は実質無効）と `ドレイン猶予 < Cloud Run の 10 秒` の 2 つ。**「ドレインが必ず間に合う」は保証できない。** `WriteTimeout` はソケットの書き込み期限であってハンドラの実行時間を止めないため、ハンドラが長引けば接続は active のままで `Shutdown` は猶予を使い切る。ハンドラ自体を縛るには `http.TimeoutHandler` が要るが、それはミドルウェアの領域（Phase 1）。ドレイン超過は**起こりうる前提**で、起きたことがログと終了コードに出る形にしてある
 
 `context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラー（SIGTERM なら `terminated signal received`）を入れる。Cloud Run のスケールダウンかローカルの Ctrl-C かがログで区別できる。
 
-**このエラーは `errors.Is(cause, context.Canceled)` が true になる**（`os/signal` の `signalError` が `Is` を実装している）。つまり「キャンセルされたか」の判定は従来どおり通るが、**逆に「シグナルで落ちたのか、親 ctx のキャンセルなのか」を `errors.Is` では区別できない**。区別したいなら文字列か、`cause != context.Canceled` で見る。
+**`errors.Is(cause, context.Canceled)` の結果は Go のパッチバージョンで変わる。** 実測で go1.26.0 は `false`、go1.26.5 は `true`（`os/signal` の `signalError.Is` が 1.26 系の途中で入ったため）。**したがって `Cause` を制御フローの判定に使わない。ログ専用にする。** `go.mod` の go directive を `1.26.5` にして環境差自体は塞いであるが、この手の「パッチバージョンで挙動が変わる新 API」は、判定に使う前に自分の toolchain で確かめる。
 
 **アプリが PID 1 で SIGTERM を受け取る必要がある。** Dockerfile の `ENTRYPOINT` をシェル形式で書くとシグナルが届かず、この節の実装が丸ごと無意味になる。下の Dockerfile 例が exec 形式なのはそのため。
 
@@ -585,7 +587,7 @@ OpenTelemetry / Cloud Trace は Phase 5 の発展課題。単一サービスな�
 
 ```
 pull_request
-  ├─ backend/** が変更 → go test ./... / golangci-lint
+  ├─ backend/** が変更 → go test -race ./... / golangci-lint
   └─ web/**     が変更 → tsc --noEmit / vitest
 
 push to main
@@ -632,11 +634,13 @@ sqlmock は「発行された SQL 文字列が期待と一致するか」を見�
 |---|---|
 | 開発用 DB | `compose.yaml` で Postgres 1 サービスのみ |
 | テスト用 DB | testcontainers（毎回使い捨て） |
-| Go | ホストで直接実行（`go run` / `air`） |
+| Go | ホストで直接実行（`just dev` = ビルド + `exec`。`go run` は使わない） |
 | Go / golangci-lint / just のバージョン供給 | nix devShell + direnv（`flake.nix` / `.envrc`。#2 で導入） |
 | フロント | `vite dev`（`/api` を `localhost:8080` にプロキシ） |
 
-**Go をコンテナに入れない。** `go run` はホストなら 1 秒台だが、コンテナ経由だとファイル同期とビルドで体感が数倍遅くなり、デバッガや LSP の設定も面倒になる。
+**Go をコンテナに入れない。** ホストでのビルドは 1 秒台だが、コンテナ経由だとファイル同期とビルドで体感が数倍遅くなり、デバッガや LSP の設定も面倒になる。
+
+**ただし `go run` は使わない（#3 で確定）。** `go run` はビルドしたバイナリを別プロセスとして起動し、SIGTERM を転送しない。`just` → `go run` → バイナリの 3 段になるため、シェルから `kill -TERM %1` を打ってもバイナリに届かず、しかも `go run` が死んだ後もバイナリが孤児として残ってポートを掴む。`just dev` はビルドしてから `exec` でバイナリに置き換える形にしてある。詳細は `justfile` のコメント。
 
 **ただしバージョンは各自の環境任せにしない。** 上の判断はビルドとファイル同期の速度の話であって、ツールをどこから持ってくるかとは別問題。`flake.nix` の `go_1_26` が `go.mod` の `go 1.26.0` と Dockerfile の `golang:1.26` に対応し、`nix flake update` を打ってもメジャーは動かない。`pkgs.go`（常に最新安定版）にすると、ある日 Go だけ 1.27 に上がって Dockerfile 側が取り残される。
 

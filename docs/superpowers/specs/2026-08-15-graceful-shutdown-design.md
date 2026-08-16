@@ -39,7 +39,7 @@ Cloud Run はインスタンス停止時に SIGTERM を送り、**10 秒後に S
 | **`srv.Shutdown` の戻り値** | 捨てずに `run` の戻り値として返す。`main` が `slog.Error` + `os.Exit(1)` | ctx が期限切れなら `Shutdown` は ctx のエラーを返す。**これは「8 秒で捌き切れずリクエストを切った」という事実そのもの。** 捨てると本番で断続的に接続が切れていても気づけない。`docs/DESIGN.md` §9 の例は `_ = srv.Shutdown(...)` |
 | **シャットダウンタイムアウト** | `defaultShutdownTimeout = 8 * time.Second` を `cmd/api/main.go` の定数に置き、**`run` の引数で渡す** | 8 秒は Cloud Run の 10 秒に対するマージン（残り 2 秒で後片付けとプロセス終了）。引数にするのは**タイムアウト超過の経路をテストするため**。定数直参照だとその 1 本が 8 秒待ちになる。定数名を `default` 付きにするのは、`run` の引数名 `shutdownTimeout` と衝突して定数がシャドウされるのを避けるため。環境変数には出さない（猶予 10 秒は Cloud Run 側で固定・設定不可なので可変にする実益がない） |
 | **シャットダウン用 ctx の親** | **`context.Background()`**。`run` が受け取った `ctx` から派生させない | `ctx` は既にキャンセル済みなので、そこから `WithTimeout` すると `Shutdown` が即座に諦め、**1 リクエストも捌かずに戻る。** この issue で唯一「コンパイルも通り一見動くが完全に間違っている」書き方 |
-| **シグナル名のログ** | `slog.Info("shutting down", "cause", context.Cause(ctx))` | **Go 1.26 の新挙動**: `NotifyContext` はシグナル起因のキャンセル時、`context.Cause` にどのシグナルかを示すエラーを入れる。SIGTERM（Cloud Run のスケールダウン）か `os.Interrupt`（ローカルの Ctrl-C）かがログで区別できる。**`ctx.Err()` は従来どおり `context.Canceled`。`context.Cause` の戻りも `errors.Is(..., context.Canceled)` が true になる**（`os/signal` の `signalError` が `Is` を実装しているため。golang/go#77639 はこの `Is` を追加して 2026-05 に解決された）。**したがって `errors.Is` では「シグナル起因か親 ctx のキャンセルか」を区別できない。区別するなら `cause != context.Canceled` で見る** |
+| **シグナル名のログ** | `slog.Info("shutting down", "cause", context.Cause(ctx))` | **Go 1.26 の新挙動**: `NotifyContext` はシグナル起因のキャンセル時、`context.Cause` にどのシグナルかを示すエラーを入れる。SIGTERM（Cloud Run のスケールダウン）か `os.Interrupt`（ローカルの Ctrl-C）かがログで区別できる。**`errors.Is(cause, context.Canceled)` の結果は Go のパッチバージョンで変わる**（実測: go1.26.0 は false、go1.26.5 は true。`signalError.Is` が 1.26 系の途中で入ったため）。**`Cause` は制御フローの判定に使わずログ専用にする。** `go.mod` の go directive は `1.26.5` にして環境差を塞いだ |
 | **`Serve` の goroutine** | エラーを容量 1 のバッファ付き channel に送る | `Shutdown` 完了後に誰も受け取らなくても goroutine が漏れない。#2 の `main` にあった goroutine 内 `os.Exit(1)` は廃止する（テストできないため） |
 | **`http.ErrServerClosed`** | `Shutdown` 前に `Serve` が返したときだけ判定し、`nil` を返す | `Shutdown` を呼ぶと `Serve` は**即座に** `ErrServerClosed` を返す（doc は「プログラムを終了させず `Shutdown` の戻りを待て」と明記）。`select` で `errCh` を先に受ける形にすると、捌き切る前に `main` を抜ける |
 | **シグナル配線のテスト** | しない。`run` のテストは親 ctx の `cancel()` で駆動する | シグナル → ctx キャンセルは標準ライブラリの責務。テストプロセス自身に `syscall.Kill` を撃つ形はプロセスグローバルに効き `t.Parallel()` と併用できず、得られるのは標準ライブラリの動作確認でしかない。**実 SIGTERM は issue の `kill -TERM %1` で手動確認する**（`CONTRIBUTING.md` §6 の 3 つ目のゲート） |
@@ -112,7 +112,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	errCh := make(chan error, 1) // バッファ 1。誰も受け取らなくても goroutine が漏れない
 	go func() { errCh <- srv.Serve(ln) }()
 
-	slog.Info("server started", "addr", ln.Addr().String())
+	slog.Info("starting server", "addr", ln.Addr().String())
 
 	select {
 	case err := <-errCh: // Shutdown 前に落ちた = 異常

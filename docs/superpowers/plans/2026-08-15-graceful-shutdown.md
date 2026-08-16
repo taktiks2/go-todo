@@ -424,7 +424,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve(ln) }()
 
-	slog.Info("server started", "addr", ln.Addr().String())
+	slog.Info("starting server", "addr", ln.Addr().String())
 
 	select {
 	case err := <-errCh: // Shutdown を呼ぶ前に落ちた = 異常
@@ -460,7 +460,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 1. **`context.WithTimeout(context.Background(), ...)`** — 親を `ctx` にするとコンパイルは通り一見動くが、`Shutdown` が即座に諦めて 1 リクエストも捌かない。この issue で唯一「動くけど完全に間違っている」書き方
 2. **`select` が `errCh` を「Done より前」の経路としてのみ使っている** — `Shutdown` を呼ぶと `Serve` は*即座に* `ErrServerClosed` を返す（`net/http` の doc が「プログラムを終了させず `Shutdown` の戻りを待て」と明記）。`errCh` を Done の後にも待つ形にすると、捌き切る前に抜ける
 3. **`stop()` が `defer` と本体の 2 か所にある** — `context.CancelFunc` は冪等。本体側は「2 回目のシグナルを通す」ため、`defer` 側は `Serve` が先に落ちた経路の後片付けのため
-4. **`context.Cause(ctx)`** — Go 1.26 の新挙動。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM か Ctrl-C かがログで区別できる。**`errors.Is(cause, context.Canceled)` は true になる**（`signalError` が `Is` を実装している）ので、`errors.Is` ではシグナル起因かどうかを判別できない
+4. **`context.Cause(ctx)`** — Go 1.26 の新挙動。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM か Ctrl-C かがログで区別できる。**`errors.Is(cause, context.Canceled)` の結果は Go のパッチバージョンで変わる**（go1.26.0 は false、go1.26.5 は true）ので、判定には使わずログ専用にする
 
 - [ ] **Step 2: 人間が `backend/cmd/api/main.go` を手で書く**
 
@@ -560,7 +560,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
     errCh := make(chan error, 1)
     go func() { errCh <- srv.Serve(ln) }()
 
-    slog.Info("server started", "addr", ln.Addr().String())
+    slog.Info("starting server", "addr", ln.Addr().String())
 
     select {
     case err := <-errCh: // Shutdown を呼ぶ前に落ちた = 異常
@@ -596,7 +596,7 @@ func run(ctx context.Context, ln net.Listener, srv *http.Server, shutdownTimeout
 - **`srv.Shutdown` の戻り値を捨てない。** ctx が期限切れなら `Shutdown` は ctx のエラーを返す。それは「猶予内に捌き切れずリクエストを切った」という事実そのもので、捨てると本番で断続的に接続が切れていても気づけない
 - **シャットダウン用 ctx の親は `context.Background()`。** `ctx` から派生させると既にキャンセル済みなので `Shutdown` が即座に諦め、1 リクエストも捌かない
 
-`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM（Cloud Run のスケールダウン）か `os.Interrupt`（ローカルの Ctrl-C）かがログで区別できる。**`errors.Is(cause, context.Canceled)` は true**（`os/signal` の `signalError` が `Is` を実装している）なので、`errors.Is` ではシグナル起因かどうかを判別できない。
+`context.Cause(ctx)` は **Go 1.26 の新挙動**を使っている。`NotifyContext` はシグナル起因のキャンセル時、`Cause` にどのシグナルかを示すエラーを入れる。SIGTERM（Cloud Run のスケールダウン）か `os.Interrupt`（ローカルの Ctrl-C）かがログで区別できる。**`errors.Is(cause, context.Canceled)` の結果は Go のパッチバージョンで変わる**（実測: go1.26.0 は false、go1.26.5 は true）ので、判定には使わずログ専用にする。
 
 **アプリが PID 1 で SIGTERM を受け取る必要がある。** Dockerfile の `ENTRYPOINT` をシェル形式で書くとシグナルが届かず、この節の実装が丸ごと無意味になる。下の Dockerfile 例が exec 形式なのはそのため。
 
@@ -661,7 +661,7 @@ Expected（実測）:
 
 ```
 mkdir -p ../.gobin && go build -o ../.gobin/api ./cmd/api && exec ../.gobin/api
-2026/08/16 14:10:29 INFO server started addr=[::]:8080
+2026/08/16 14:10:29 INFO starting server addr=[::]:8080
 {"status":"ok"}
 2026/08/16 14:10:30 INFO shutting down cause="terminated signal received"
 error: interrupted by SIGTERM
