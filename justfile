@@ -26,7 +26,7 @@ default:
 #
 #   just dev &
 #   sleep 1
-#   curl -s localhost:8080/healthz
+#   curl -s localhost:8080/api/healthz
 #   kill -TERM %1
 #
 # 期待する出力:
@@ -104,7 +104,7 @@ docker-build:
 # ホスト側は 8080 に固定するので、確認は素直な curl でよい:
 #
 #   just docker-run &
-#   curl -s localhost:8080/healthz | jq
+#   curl -s localhost:8080/api/healthz | jq
 #
 # --platform をここでも書くのは、amd64 イメージを arm64 ホストで動かすのが
 # 暗黙のエミュレーション頼みだから。省くと Docker が毎回警告を出すうえ、
