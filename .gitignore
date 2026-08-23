@@ -38,8 +38,14 @@ serviceAccountKey.json
 # *.tfvars は「作らない」方針を破ったときの保険（docs/DESIGN.md §9）。
 # *.tfvars.json も同じ保険。*.tfvars だけでは terraform.tfvars.json や
 # *.auto.tfvars.json を拾えない。
+# *.tfplan も同じ保険。`terraform plan -out=...` は prior state をまるごと
+# バイナリに埋め込むため、*.tfstate と同じ機密を含む（Phase 2 以降は
+# DATABASE_URL も）。crash*.log は terraform がクラッシュ時に吐く state の
+# 断片で、意図せず残ると同じ理由で危険。
 .terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
 *.tfvars.json
+*.tfplan
+crash*.log

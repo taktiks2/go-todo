@@ -129,6 +129,20 @@ docker-run port="9090": docker-build
 #
 # :latest を本番のタグとして使わない。#7 が SHA タグを打つ設計と混ざると
 # 「今動いているのはどのコミットか」がレジストリから読めなくなる。
+#
+# :bootstrap も実は同じ問題を持つ。just docker-push は毎回そのビルド時点の
+# image に :bootstrap を上書きするので、このタグ自体は「今動いているのは
+# どのコミットか」を教えない。それでも許容しているのは、:bootstrap の役目が
+# 「サービスをゼロから apply するとき pull できる何かがある」ことだけで、
+# lifecycle.ignore_changes によりこの image は作成時にしか読まれないため。
+# 再作成したサービスが実際どのコミットを動かしているか知りたいときは、
+# push した digest を別途控える。
+#
+# 前提: `gcloud auth configure-docker asia-northeast1-docker.pkg.dev` を
+# 一度実行しておくこと。無いと push が
+# `denied: Permission "artifactregistry.repositories.uploadArtifacts" denied`
+# で失敗する（Docker の認証情報ヘルパーが登録されておらず、gcloud 側の権限が
+# あっても docker push 自体は未認証のまま送られるため）。
 
 # ビルドしたイメージを Artifact Registry に push する
 docker-push tag="bootstrap": docker-build
@@ -140,6 +154,12 @@ docker-push tag="bootstrap": docker-build
 # tf-apply-registry だけは初回専用。Cloud Run は実在するイメージを要求するが
 # Artifact Registry はこの issue で初めて作るので空、という鶏と卵を解くために
 # AR だけ先に apply する。2 回目以降は tf-apply だけでよい。
+#
+# 前提: `just tf-init` を一度実行しておくこと。GCS backend が未初期化だと
+# tf-plan / tf-apply などは
+# `Error: Backend initialization required, please run "terraform init"`
+# で落ちる。tf-init を他のレシピの依存にしないのは意図的で、terraform init は
+# 毎回 GCS backend に接続しに行くため、依存にすると普段の tf-plan まで遅くなる。
 
 # Terraform を初期化する
 [working-directory('infra')]
