@@ -47,6 +47,7 @@ func TestRoutes(t *testing.T) {
 		{name: "GET /api/healthz は 200", method: http.MethodGet, path: "/api/healthz", wantStatus: http.StatusOK},
 		{name: "POST /api/healthz は 405", method: http.MethodPost, path: "/api/healthz", wantStatus: http.StatusMethodNotAllowed},
 		{name: "未登録のパスは 404", method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound},
+		{name: "GET /healthz は 404（GFE が横取りするため意図的に非公開。docs/DESIGN.md §14）", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
