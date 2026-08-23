@@ -64,8 +64,9 @@ lint:
 fmt:
     golangci-lint fmt
 
-# ローカルのイメージ名。Artifact Registry のパスは #5 で決める。
-image := "go-todo"
+# Artifact Registry のイメージパス（#5 で確定）。
+# docker-build がここにタグを打ち、docker-push がそのまま押し上げる。
+image := "asia-northeast1-docker.pkg.dev/taktiks2-go-todo/go-todo/api"
 
 # コンテナ名はイメージ名と別に持つ。#5 で image が
 # `asia-northeast1-docker.pkg.dev/.../api` のようなパスになると、
@@ -121,3 +122,41 @@ docker-build:
 # コンテナを起動する（コンテナ内は PORT、ホストは 8080）
 docker-run port="9090": docker-build
     docker run --rm --platform linux/amd64 --name {{container}} -e PORT={{port}} -p 8080:{{port}} {{image}}
+
+# docker-build はタグ無し（= :latest）で作るので、ここで目的のタグを付け直す。
+# 初回は :bootstrap。Cloud Run の初回作成が pull するのはこれ 1 つだけで、
+# 以降のイメージ更新は #7 の CD が SHA タグで行う（lifecycle.ignore_changes）。
+#
+# :latest を本番のタグとして使わない。#7 が SHA タグを打つ設計と混ぎると
+# 「今動いているのはどのコミットか」がレジストリから読めなくなる。
+
+# ビルドしたイメージを Artifact Registry に push する
+docker-push tag="bootstrap": docker-build
+    docker tag {{image}} {{image}}:{{tag}}
+    docker push {{image}}:{{tag}}
+
+# Terraform の入口。infra/ の中で走らせる。
+#
+# tf-apply-registry だけは初回専用。Cloud Run は実在するイメージを要求するが
+# Artifact Registry はこの issue で初めて作るので空、という鶏と卵を解くために
+# AR だけ先に apply する。2 回目以降は tf-apply だけでよい。
+
+# Terraform を初期化する
+[working-directory('infra')]
+tf-init:
+    terraform init
+
+# 差分を確認する
+[working-directory('infra')]
+tf-plan:
+    terraform plan
+
+# 差分を適用する
+[working-directory('infra')]
+tf-apply:
+    terraform apply
+
+# 初回だけ: Artifact Registry を先に作る
+[working-directory('infra')]
+tf-apply-registry:
+    terraform apply -target=google_artifact_registry_repository.app
