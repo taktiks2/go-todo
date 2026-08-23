@@ -254,9 +254,11 @@ Go 側を生成しない理由: `StrictServerInterface` は「契約とハンド
 | `POST` | `/api/todos` | 作成 |
 | `PATCH` | `/api/todos/{id}` | 更新（title / done） |
 | `DELETE` | `/api/todos/{id}` | 削除 |
-| `GET` | `/healthz` | ヘルスチェック（認証不要） |
+| `GET` | `/api/healthz` | ヘルスチェック（認証不要） |
 
-すべて `Authorization: Bearer <Firebase ID token>` を要求する（`/healthz` を除く）。
+すべて `Authorization: Bearer <Firebase ID token>` を要求する（`/api/healthz` を除く）。
+`/healthz` ではなく `/api/healthz` なのは、Google Frontend が `*.run.app` の `/healthz` を
+アプリに届く前に横取りするため。詳細と実験結果は §14 を参照。
 
 ### ルーティング（Go 1.22+ の標準 ServeMux）
 
@@ -266,7 +268,7 @@ mux.Handle("GET /api/todos",         authMW(http.HandlerFunc(h.ListTodos)))
 mux.Handle("POST /api/todos",        authMW(http.HandlerFunc(h.CreateTodo)))
 mux.Handle("PATCH /api/todos/{id}",  authMW(http.HandlerFunc(h.UpdateTodo)))
 mux.Handle("DELETE /api/todos/{id}", authMW(http.HandlerFunc(h.DeleteTodo)))
-mux.HandleFunc("GET /healthz",       h.Healthz)
+mux.HandleFunc("GET /api/healthz",   h.Healthz)
 ```
 
 パスパラメータは `r.PathValue("id")` で取得する。Go 1.22 でメソッド指定とワイルドカードが標準サポートされたため、ルータライブラリは不要。
@@ -597,6 +599,40 @@ OpenTelemetry / Cloud Trace は Phase 5 の発展課題。単一サービスな�
 
 手順は `scripts/bootstrap.sh` にある。**このスクリプトは冪等ではない。** 一度きりの記録として読む。
 
+#### 決定値（#5 で確定）
+
+| 項目 | 値 |
+|---|---|
+| Cloud Run サービス名 | `go-todo-api` |
+| Cloud Run / AR のリージョン | `asia-northeast1` |
+| イメージのパス | `asia-northeast1-docker.pkg.dev/taktiks2-go-todo/go-todo/api` |
+| ランタイム SA | `go-todo-run@taktiks2-go-todo.iam.gserviceaccount.com` |
+| Secret の箱 | `database-url`（値は Phase 2 で `gcloud` から） |
+| state の prefix | `infra` |
+
+**`ignore_changes` は `image` だけでは足りない。** #7 の `gcloud run deploy` は
+デプロイのたびに `client` / `client_version` を書き換える。除外しないと次の
+`terraform plan` が毎回それを戻そうとして差分を出す。「インフラの形は Terraform、
+動くバージョンは CD」という責務分割は、**CD が触るフィールドを全部除外して初めて成立する。**
+実際に確かめた。`gcloud run deploy` の直後、Cloud Run v2 API は `"client": "gcloud"` /
+`"clientVersion": "565.0.0"` を返すが、Terraform の state はどちらも `null` のまま――
+`ignore_changes` がこの書き込みを吸収し、`terraform plan` は `No changes.` を返した。
+除外していなければ、デプロイのたびに plan がこの 2 フィールドで汚れていたはずの差分。
+
+**初回だけ apply が 2 段階になる。** Cloud Run は実在するイメージを要求するが、
+Artifact Registry はこの issue で初めて作るので空。`-target` で AR だけ先に apply し、
+`just docker-push` でイメージを置いてから残りを apply する。`scripts/bootstrap.sh` と
+同じく一度きりの手順で、冪等化しない。
+
+**ランタイム SA を自前で作る。** `template.service_account` を書かないと Compute Engine
+の既定 SA が使われるが、`compute.googleapis.com` は #1 で有効化していないため既定 SA
+自体が存在しない可能性が高い。存在したとしても Editor 権限で過剰。
+
+**Phase 0 では `DATABASE_URL` を Cloud Run に繋がない。** Cloud Run は**リビジョン起動時に
+secret を解決する**ので、version の入っていない secret を参照した瞬間にリビジョンが
+Ready にならず、公開 URL が JSON を返さなくなる。箱と `secretAccessor` だけ先に用意し、
+参照は Phase 2 で値を入れるときに足す。
+
 ### CI/CD: GitHub Actions + Workload Identity Federation
 
 **検査は PR、デプロイは main** の 2 系統に分ける。
@@ -730,7 +766,7 @@ Phase 0 はインフラだけではない。以下も Phase 0 で作り切る。
 
 - `backend/go.mod`（`go mod init`）と `docs/DESIGN.md` 3 章のディレクトリ構成
 - `justfile`（`just dev` / `test` / `lint` の入口）
-- `cmd/api/main.go`、`/healthz` ハンドラ、グレースフルシャットダウン
+- `cmd/api/main.go`、`/api/healthz` ハンドラ、グレースフルシャットダウン
 
 こうしておくと Phase 1 の最初の issue が「土台 + 最初のエンドポイント」で肥大化せず、
 Phase 1 の 4 本（GET / POST / PATCH / DELETE）がすべて同じ大きさに揃う。
@@ -776,8 +812,9 @@ Phase 2 で `postgres` 実装に差し替えたとき、**`todo` パッケージ
 - **Neon はクロスクラウド**。Cloud Run（GCP asia-northeast1）から Neon（AWS）へは数〜数十 ms のレイテンシが乗る。学習用途では無視できるが、**「本番なら Cloud SQL を選ぶ理由」がここにある**と理解しておく。Phase 5 で Cloud SQL を一度試す
 - **Terraform 先行の学習負荷**。Go ほぼ未経験との組み合わせで負荷が高い。Phase 0 のインフラを書き切ったら**しばらく触らない**と決めて Go に戻る
 - **Phase 0 が最難関**。Go が 1 行も出てこない。ここを「アプリ開発の前の関門」と割り切れるかが完走の分かれ目
-- **Artifact Registry の無料枠は 0.5 GB/月**。**イメージサイズ × デプロイ回数ではない。** レジストリが持つのは gzip 圧縮後のレイヤで、しかも digest が同じレイヤは重複排除される。#4 の実測では distroless の base レイヤが圧縮後 0.77 MB（全デプロイで 1 回だけ）、アプリのレイヤが 6.10 MB → 圧縮後 **2.54 MB**（デプロイごとに増える）。したがって無料枠を使い切るのは 190 回前後のデプロイで、当面は届かない。それでも #5 でリポジトリを作るときに cleanup policy は入れる（超過は $0.10/GB/月 と安いが、古いイメージが無限に積むこと自体を止めたい）
-- **Cloud Run の無料枠にリージョン制限があるか未確認**。公式の Free Tier ページは Cloud Storage にだけ「US リージョンのみ」と明記し、Cloud Run には書いていないが、二次情報は US 3 リージョン限定と主張している。**#5 でリージョンを確定する前に公式ページで確認する。** US 限定なら `asia-northeast1` 前提そのものを見直すことになる
+- **Artifact Registry の無料枠は 0.5 GB/月**。**イメージサイズ × デプロイ回数ではない。** レジストリが持つのは gzip 圧縮後のレイヤで、しかも digest が同じレイヤは重複排除される。#4 の実測では distroless の base レイヤが圧縮後 0.77 MB（全デプロイで 1 回だけ）、アプリのレイヤが 6.10 MB → 圧縮後 **2.54 MB**（デプロイごとに増える）。したがって無料枠を使い切るのは 190 回前後のデプロイで、当面は届かない。それでも #5 でリポジトリを作るときに cleanup policy は入れる（超過は $0.10/GB/月 と安いが、古いイメージが無限に積むこと自体を止めたい）。#5 で入れたのは「直近 20 世代を無条件に KEEP」「`bootstrap` で始まるタグを無条件に KEEP」「30 日より古いものを DELETE」の 3 本（`infra/artifact_registry.tf`）。keep-bootstrap があるのは、`cloud_run.tf` がサービス作成時点の image を `:bootstrap` タグで直書きしているため——これが消えると `destroy → apply` のようなサービス再作成が「Image ... not found」で落ちる。KEEP が DELETE より優先されるため、巻き戻し先は常に直近 20 世代残る。確認は `gcloud artifacts repositories describe` で行うが、`cleanupPolicyDryRun` は `false` のときも**空欄**で返る（proto3 は既定値を省略する）。空＝未設定ではない
+- ~~**Cloud Run の無料枠にリージョン制限があるか未確認**~~ → **#5 で解決。`asia-northeast1` のままでよい。** 公式の Cloud Run 料金ページは無料枠を「**Tier 1 価格ベースの spending based discount**」として適用すると明記しており、`asia-northeast1 (Tokyo)` は Tier 1 リージョンの一覧に含まれる。したがってリージョンによる無料枠の喪失は起きない。「US 3 リージョン限定」は **Cloud Storage の規則**であって Cloud Run のものではなく、それを Cloud Run に当てはめた二次情報が誤っていた
+- **ヘルスチェックのパスは `/healthz` ではなく `/api/healthz`。** `https://<service>.run.app/healthz` は Google Frontend が横取りし、Google 側の HTML 404 を返す――Cloud Run のリクエストログにも一切現れない。他のあらゆるパス（`/`、`/foo`、`/health`、`/healthzz`、大文字小文字違い、`/healthz/`、`/a/healthz`、`/api/todos`）はアプリまで届き、Go の `404 page not found` が返る。同じイメージをローカルで動かすと `/healthz` は `{"status":"ok"}` を返す――アプリやイメージの問題ではない。介入はケースセンシティブな完全一致で、クエリ文字列を足しても変わらない。`*.run.app` は `/healthz` だけを予約語のように扱っている。`/api/healthz` を選んだのは、他のエンドポイントが全部 `/api/*` の下にあり、Phase 4 の Firebase Hosting リライト（`/api/**` → Cloud Run）でも素通りできるため
 
 ### 着手時に決めること
 

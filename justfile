@@ -26,7 +26,7 @@ default:
 #
 #   just dev &
 #   sleep 1
-#   curl -s localhost:8080/healthz
+#   curl -s localhost:8080/api/healthz
 #   kill -TERM %1
 #
 # 期待する出力:
@@ -64,8 +64,9 @@ lint:
 fmt:
     golangci-lint fmt
 
-# ローカルのイメージ名。Artifact Registry のパスは #5 で決める。
-image := "go-todo"
+# Artifact Registry のイメージパス（#5 で確定）。
+# docker-build がここにタグを打ち、docker-push がそのまま押し上げる。
+image := "asia-northeast1-docker.pkg.dev/taktiks2-go-todo/go-todo/api"
 
 # コンテナ名はイメージ名と別に持つ。#5 で image が
 # `asia-northeast1-docker.pkg.dev/.../api` のようなパスになると、
@@ -103,7 +104,7 @@ docker-build:
 # ホスト側は 8080 に固定するので、確認は素直な curl でよい:
 #
 #   just docker-run &
-#   curl -s localhost:8080/healthz | jq
+#   curl -s localhost:8080/api/healthz | jq
 #
 # --platform をここでも書くのは、amd64 イメージを arm64 ホストで動かすのが
 # 暗黙のエミュレーション頼みだから。省くと Docker が毎回警告を出すうえ、
@@ -121,3 +122,71 @@ docker-build:
 # コンテナを起動する（コンテナ内は PORT、ホストは 8080）
 docker-run port="9090": docker-build
     docker run --rm --platform linux/amd64 --name {{container}} -e PORT={{port}} -p 8080:{{port}} {{image}}
+
+# docker-build はタグ無し（= :latest）で作るので、ここで目的のタグを付け直す。
+# 初回は :bootstrap。Cloud Run の初回作成が pull するのはこれ 1 つだけで、
+# 以降のイメージ更新は #7 の CD が SHA タグで行う（lifecycle.ignore_changes）。
+#
+# :latest を本番のタグとして使わない。#7 が SHA タグを打つ設計と混ざると
+# 「今動いているのはどのコミットか」がレジストリから読めなくなる。
+#
+# :bootstrap も実は同じ問題を持つ。just docker-push は毎回そのビルド時点の
+# image に :bootstrap を上書きするので、このタグ自体は「今動いているのは
+# どのコミットか」を教えない。それでも許容しているのは、:bootstrap の役目が
+# 「サービスをゼロから apply するとき pull できる何かがある」ことだけで、
+# lifecycle.ignore_changes によりこの image は作成時にしか読まれないため。
+# 再作成したサービスが実際どのコミットを動かしているか知りたいときは、
+# push した digest を別途控える。
+#
+# 前提: `gcloud auth configure-docker asia-northeast1-docker.pkg.dev` を
+# 一度実行しておくこと。無いと push が
+# `denied: Permission "artifactregistry.repositories.uploadArtifacts" denied`
+# で失敗する（Docker の認証情報ヘルパーが登録されておらず、gcloud 側の権限が
+# あっても docker push 自体は未認証のまま送られるため）。
+
+# ビルドしたイメージを Artifact Registry に push する
+docker-push tag="bootstrap": docker-build
+    docker tag {{image}} {{image}}:{{tag}}
+    docker push {{image}}:{{tag}}
+
+# Terraform の入口。infra/ の中で走らせる。
+#
+# tf-apply-registry だけは初回専用。Cloud Run は実在するイメージを要求するが
+# Artifact Registry はこの issue で初めて作るので空、という鶏と卵を解くために
+# AR だけ先に apply する。2 回目以降は tf-apply だけでよい。
+#
+# 前提: `just tf-init` を一度実行しておくこと。GCS backend が未初期化だと
+# tf-plan / tf-apply などは
+# `Error: Backend initialization required, please run "terraform init"`
+# で落ちる。tf-init を他のレシピの依存にしないのは意図的で、terraform init は
+# 毎回 GCS backend に接続しに行くため、依存にすると普段の tf-plan まで遅くなる。
+
+# Terraform を初期化する
+[working-directory('infra')]
+tf-init:
+    terraform init
+
+# フォーマットを揃える
+[working-directory('infra')]
+tf-fmt:
+    terraform fmt -recursive
+
+# 構文と設定の妥当性を検証する
+[working-directory('infra')]
+tf-validate:
+    terraform validate
+
+# 差分を確認する
+[working-directory('infra')]
+tf-plan:
+    terraform plan
+
+# 差分を適用する
+[working-directory('infra')]
+tf-apply:
+    terraform apply
+
+# 初回だけ: Artifact Registry を先に作る
+[working-directory('infra')]
+tf-apply-registry:
+    terraform apply -target=google_artifact_registry_repository.app
