@@ -127,7 +127,7 @@ docker-run port="9090": docker-build
 # 初回は :bootstrap。Cloud Run の初回作成が pull するのはこれ 1 つだけで、
 # 以降のイメージ更新は #7 の CD が SHA タグで行う（lifecycle.ignore_changes）。
 #
-# :latest を本番のタグとして使わない。#7 が SHA タグを打つ設計と混ぎると
+# :latest を本番のタグとして使わない。#7 が SHA タグを打つ設計と混ざると
 # 「今動いているのはどのコミットか」がレジストリから読めなくなる。
 
 # ビルドしたイメージを Artifact Registry に push する
