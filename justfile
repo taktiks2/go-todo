@@ -190,3 +190,13 @@ tf-apply:
 [working-directory('infra')]
 tf-apply-registry:
     terraform apply -target=google_artifact_registry_repository.app
+
+# terraform output から GitHub のリポジトリ変数を設定する。
+#
+# 手で写すと事故る値（プロバイダのフルリソース名はプロジェクト番号を含む）なので
+# コマンドにする。プールを作り直したときもこれ 1 本で同期できる。
+# 前提: just tf-apply が済んでいること。
+[working-directory('infra')]
+gh-vars:
+    gh variable set WIF_PROVIDER --body "$(terraform output -raw workload_identity_provider)"
+    gh variable set DEPLOY_SA --body "$(terraform output -raw deploy_service_account_email)"
