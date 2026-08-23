@@ -35,6 +35,11 @@ just tf-init
 gh auth status
 ```
 
+**`gcloud` の各コマンドに `--project=taktiks2-go-todo` を付けてある。** このマシンの
+`core/project` は未設定で、省略すると `Failed to find attribute [project]` で落ちる
+（実測）。`gcloud config set project taktiks2-go-todo` を一度打って省略する手もあるが、
+グローバル設定を書き換えないほうを既定にする。
+
 1 つ目は #1 の `bootstrap.sh` が案内した ADC が生きているかの確認。2 つ目は GCS backend の初期化（済んでいれば数秒で終わる）。3 つ目は Task 3 の `gh variable set` がリポジトリの管理権限を要求するため。
 
 ---
@@ -182,10 +187,10 @@ just tf-apply
 
 ```sh
 gcloud iam workload-identity-pools describe github \
-  --location=global --format='value(name,state)'
+  --project=taktiks2-go-todo --location=global --format='value(name,state)'
 
 gcloud iam workload-identity-pools providers describe github-actions \
-  --location=global --workload-identity-pool=github \
+  --project=taktiks2-go-todo --location=global --workload-identity-pool=github \
   --format='value(name,attributeCondition,oidc.issuerUri)'
 ```
 
@@ -313,7 +318,7 @@ gcloud projects get-iam-policy taktiks2-go-todo \
   --format='value(bindings.role)'
 
 gcloud artifacts repositories get-iam-policy go-todo \
-  --location=asia-northeast1 \
+  --project=taktiks2-go-todo --location=asia-northeast1 \
   --format='value(bindings.role,bindings.members)'
 ```
 
