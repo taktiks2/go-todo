@@ -398,8 +398,11 @@ just docker-push
 ```sh
 gcloud artifacts docker images list \
   asia-northeast1-docker.pkg.dev/taktiks2-go-todo/go-todo/api \
+  --include-tags \
   --format='value(package,tags)'
 ```
+
+`--include-tags` が無いと tags 列が黙って空になる。
 
 期待する結果: `.../go-todo/api` と `bootstrap` の 1 行。
 

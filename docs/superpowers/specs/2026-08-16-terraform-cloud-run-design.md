@@ -130,9 +130,11 @@ resource "google_artifact_registry_repository" "app" {
   format        = "DOCKER"
   description   = "go-todo のコンテナイメージ"
 
-  # 初回は true で流し、Cloud Logging に出る「消える対象」を確認してから false にする。
-  # 無料枠 0.5 GB を守るのが目的であって、消しすぎてロールバック先を失うのは本末転倒。
-  cleanup_policy_dry_run = true
+  # dry run で始めない。リポジトリのイメージは 0 個で下の keep-recent が直近 5 世代を
+  # 無条件に守るため、有効にしても消えるものが存在しない。cleanup policy は非同期
+  # （およそ日次）で走るので dry run のログを PR の中で確認する術も無い。
+  # 「入れたが効いていない」状態で放置する方が危険。
+  cleanup_policy_dry_run = false
 
   # KEEP は DELETE より優先される。直近 5 世代は日数に関係なく必ず残るので、
   # 事故った直後の巻き戻しは常に効く（#1 の tfstate-lifecycle.json と同じ考え方）。
@@ -458,6 +460,7 @@ gh issue develop 5 --name 5-terraform-cloud-run --checkout   # 実施済み
 | `gcloud run deploy` は `client` / `client_version` を書き換える | `ignore_changes` に足す |
 | Cloud Run はリビジョン起動時に secret を解決する | version の無い secret を env に繋ぐとリビジョンが Ready にならない。Phase 2 まで繋がない |
 | AR からの pull は Cloud Run のサービスエージェントが行い、API 有効化時に `artifactregistry.reader` を自動で持つ | 追加の IAM は要らない |
+| AR は作成時点でイメージ 0 個。dry run にしても消える対象が無く、cleanup policy は非同期（およそ日次）実行なので dry run のログも PR の中では確認できない | `cleanup_policy_dry_run` は当初案の `true` ではなく `false` から始める |
 | AR の cleanup policy は KEEP が DELETE より優先される | `keep_count = 5` が最後の砦になる |
 | AR の cleanup 条件 `tag_state = "UNTAGGED"` は #7 の CD（SHA タグ）では発火しない | `older_than` で切る |
 | AR の cleanup の duration は API が秒に正規化する | `"2592000s"` と書く。`"30d"` は plan の差分要因になりうる |
