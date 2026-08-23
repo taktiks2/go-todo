@@ -1,0 +1,35 @@
+# issue #6 の検証専用。WIF が通ることを一度だけ確認するために置く。
+# 恒久的な workflow は #7 が書くので、確認が済んだらこのファイルは削除する。
+name: wif-verify
+
+on:
+  push:
+    branches:
+      - 6-workload-identity-federation
+
+# id-token: write が無いと OIDC トークンを発行できない。
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA }}
+
+      # auth が書いた認証情報を gcloud に食わせる。これが無いと
+      # gcloud auth list に active account が出ない。
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # 1. 借用そのもの: go-todo-deploy@… が出れば成功
+      - run: gcloud auth list
+
+      # 2. roles/run.developer の確認
+      - run: gcloud run services describe go-todo-api --region asia-northeast1 --format 'value(status.url)'
+
+      # 3. roles/artifactregistry.writer の確認
+      - run: gcloud artifacts repositories describe go-todo --location asia-northeast1
