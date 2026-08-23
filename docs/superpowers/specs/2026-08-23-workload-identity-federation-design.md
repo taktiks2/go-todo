@@ -302,12 +302,15 @@ gh run watch
 
 ## 作業の流れ
 
-1. `infra/wif.tf` / `variables.tf` / `outputs.tf` / `justfile` を書く（1 コミット）
-2. `just tf-apply` → `just gh-vars`
-3. `wif-verify.yml` を足して push、成功ログを取る（1 コミット）
-4. `wif-verify.yml` を削除（1 コミット）
-5. `docs/DESIGN.md` を更新（1 コミット）
-6. PR 本文に workflow の実行ログを貼って `Closes #6`
+実装計画は `docs/superpowers/plans/2026-08-23-workload-identity-federation.md`。
+6 タスク・各 1 コミットで、apply を挟むたびに実物を `gcloud` で確認する。
+
+1. プールとプロバイダ（`wif.tf` / `variables.tf` / `outputs.tf`）→ apply
+2. デプロイ SA と IAM binding 4 本 → apply
+3. `just gh-vars` を追加してリポジトリ変数を設定
+4. `wif-verify.yml` を足して push、成功ログを取る
+5. `wif-verify.yml` を削除
+6. `docs/DESIGN.md` と issue #7 の本文を更新 → PR に実行ログを貼って `Closes #6`
 
 ## スコープ外
 
