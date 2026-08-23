@@ -563,7 +563,7 @@ just tf-apply
 - [ ] **Step 5: 公開 URL が JSON を返すことを確認する（人間）**
 
 ```sh
-curl -s "$(terraform -chdir=infra output -raw service_url)/healthz" | jq
+curl -s "$(terraform -chdir=infra output -raw service_url)/api/healthz" | jq
 ```
 
 期待する結果: `{"status":"ok"}` 相当が返る。
@@ -797,7 +797,7 @@ git commit -m "docs: Terraform の実装結果を DESIGN.md に反映"
 terraform -chdir=infra plan                       # → No changes. Your infrastructure matches the configuration.
 gcloud storage ls "gs://taktiks2-go-todo-tfstate/infra/**"
 terraform -chdir=infra output
-curl -s "$(terraform -chdir=infra output -raw service_url)/healthz" | jq
+curl -s "$(terraform -chdir=infra output -raw service_url)/api/healthz" | jq
 
 # 2. Go 側を壊していないこと
 just test

@@ -12,7 +12,7 @@
 > | 初版の記述 | 実際 |
 > |---|---|
 > | ヘルスチェックのパスは `/healthz`（検証コマンドの `curl` も含む） | **`/api/healthz` に移した。** `*.run.app` では Google Frontend が `/healthz` だけを横取りし、Cloud Run に届く前に HTML 404 を返す（リクエストログにも一切現れない）。根拠と検証の全量は `docs/DESIGN.md` §14 |
-> | 決定事項の TDD 行:「適用外」「テストで守れる振る舞いが無い」 | **Go のコードにも触れた。** `/healthz` → `/api/healthz` の移動は `backend/internal/http/router.go` と `handler_test.go` の変更を伴った。`CONTRIBUTING.md` §1 は `mode:ai-only` issue（#5 はこのラベルを持つ）に限り Claude が Go の実装コードを直接編集することを許しており、その例外の範囲内。TDD 自体は省略していない――先に失敗するテストを書いて RED を確認し、実装して GREEN にした（`CONTRIBUTING.md` §2） |
+> | 決定事項の TDD 行:「適用外」「テストで守れる振る舞いが無い」 | **Go のコードにも触れた。** `/healthz` → `/api/healthz` の移動は `backend/internal/http/router.go` と `handler_test.go` の変更を伴った。`CONTRIBUTING.md` §1 は `mode:ai-only` issue（#5 はこのラベルを持つ）に限り Claude が Go の実装コードを直接編集することを許しており、その例外の範囲内。RED は実装中に確認したが、`test(...)` を分けたコミットは無い――`CONTRIBUTING.md:37` は `mode:ai-only` issue を pair-tdd のループ（`test:` → `feat:` の 2 コミット）から除外しており、#5 はこのラベルを持つため、テストと実装は `fix(http): ヘルスチェックを /healthz から /api/healthz に移す`（`15ce939`）1 コミットにまとまっている |
 > | provider 最新は `7.44.0` | コミットした `infra/.terraform.lock.hcl` が固定したのは **`7.45.0`**（`~> 7.0` の範囲内） |
 > | `cleanup_policy_dry_run` は `true` で始めて後から `false` にする | **最初から `false` で始めた。** 理由は下の `infra/artifact_registry.tf` のコード例のコメントどおり（AR は作成時点でイメージ 0 個で、有効にしても消える対象が無い） |
 
