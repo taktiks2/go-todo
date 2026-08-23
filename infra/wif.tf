@@ -59,3 +59,48 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     prevent_destroy = true
   }
 }
+
+# CD が借用する ID。ランタイム SA（go-todo-run）とは役割が違うので分ける。
+# キーは作らない——作らないことがこの issue の目的。
+resource "google_service_account" "deploy" {
+  account_id   = "go-todo-deploy"
+  display_name = "go-todo GitHub Actions deployer"
+}
+
+# 3 ステップ目: このリポジトリの workflow だけが deploy SA を借用できる。
+#
+# 入口（attribute_condition）を数値 ID で閉じてあるので、ここは名前で書いてよい。
+# 「どのリポジトリに貸しているか」を IAM ポリシー上で人間が読めることを優先する。
+resource "google_service_account_iam_member" "deploy_wif_user" {
+  service_account_id = google_service_account.deploy.name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repository}"
+}
+
+# gcloud run deploy に必要な最小。run.admin にしない——admin は setIamPolicy を
+# 含み、CD が「未認証で公開するかどうか」を書き換えられてしまう。
+# 公開設定は cloud_run.tf（Terraform）の責務。
+resource "google_project_iam_member" "deploy_run_developer" {
+  project = var.project_id
+  role    = "roles/run.developer"
+  member  = "serviceAccount:${google_service_account.deploy.email}"
+}
+
+# docker push 用。プロジェクト全体ではなくこのリポジトリだけに張る。
+resource "google_artifact_registry_repository_iam_member" "deploy_writer" {
+  location   = google_artifact_registry_repository.app.location
+  repository = google_artifact_registry_repository.app.name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.deploy.email}"
+}
+
+# gcloud run deploy --service-account go-todo-run@… は「その SA として振る舞う」
+# 許可（actAs）を要求する。run.developer だけでは足りない。
+#
+# ランタイム SA というリソースに対して張る。プロジェクト単位で
+# roles/iam.serviceAccountUser を渡すと、CD がプロジェクト内の全 SA を借用できる。
+resource "google_service_account_iam_member" "deploy_act_as_runtime" {
+  service_account_id = google_service_account.run_runtime.name
+  role               = "roles/iam.serviceAccountUser"
+  member             = "serviceAccount:${google_service_account.deploy.email}"
+}

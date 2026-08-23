@@ -20,3 +20,8 @@ output "workload_identity_provider" {
   description = "リポジトリ変数 WIF_PROVIDER の値"
   value       = google_iam_workload_identity_pool_provider.github.name
 }
+
+output "deploy_service_account_email" {
+  description = "リポジトリ変数 DEPLOY_SA の値"
+  value       = google_service_account.deploy.email
+}
