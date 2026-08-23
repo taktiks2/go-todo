@@ -658,6 +658,43 @@ PR をレビュー単位・CI 単位として使う意味が消える。開発�
 - WIF は GitHub Actions が発行する OIDC トークンを GCP が検証して短命の権限を渡す仕組み。**秘密情報がリポジトリに存在しない**
 - 設定は「Workload Identity プールを作る → GitHub リポジトリを条件に紐づける → SA への借用を許可する」の 3 ステップ。**理解すれば AWS の OIDC 連携も同じ絵で読める**
 
+#### 決定値（#6 で確定）
+
+| 項目 | 値 |
+|---|---|
+| Workload Identity プール | `github` |
+| プロバイダ | `github-actions` |
+| デプロイ SA | `go-todo-deploy@taktiks2-go-todo.iam.gserviceaccount.com` |
+| 入口の条件 | `assertion.repository_owner_id == '37180466' && assertion.repository_id == '1332914759'` |
+| 借用の許可 | `principalSet://…/attribute.repository/taktiks2/go-todo` に `roles/iam.workloadIdentityUser` |
+| デプロイ SA のロール | `roles/run.developer`（プロジェクト）/ `roles/artifactregistry.writer`（AR リポジトリ）/ `roles/iam.serviceAccountUser`（`go-todo-run` SA） |
+| リポジトリ変数 | `WIF_PROVIDER` / `DEPLOY_SA`（`just gh-vars` が `terraform output` から設定） |
+| action | `google-github-actions/auth@v3` / `google-github-actions/setup-gcloud@v3` |
+
+**プールとプロバイダだけは「壊して作り直す」が効かない。** 削除すると約 30 日の
+ソフトデリートに入り、その間は同じ ID で作り直せない（`undelete` で復活はできる）。
+他のリソースは `deletion_protection = false` で作り直す前提にしているが、ここだけは
+`prevent_destroy = true` を付けた。代償として `terraform destroy` 全体が止まるので、
+本当に消すときはコードを一時的に編集する。作り直したくなったら ID を `github-2` に変える。
+
+**`attribute_condition` は書かないと危険で、書き方も縛られる。** これが無いと
+GitHub の**全リポジトリ**がトークンを交換できてしまう。さらに、CEL と principalSet が
+参照する属性は `attribute_mapping` に載っていないと `INVALID_ARGUMENT` で弾かれる。
+
+**条件は名前ではなく数値 ID で書く。** `assertion.repository == 'taktiks2/go-todo'` は、
+リポジトリやアカウントを消したときに第三者が同名を取得して同じ条件を満たせる
+（GCP 公式がスクワッティングとして警告している）。`repository_owner_id` /
+`repository_id` は再利用されない。一方 IAM の principalSet は入口で既に閉じた後なので、
+`attribute.repository/taktiks2/go-todo` と人間が読める形にしてある。
+
+**`run.admin` ではなく `run.developer`。** admin は `setIamPolicy` を含み、CD が
+「未認証で公開するかどうか」を書き換えられてしまう。公開設定は Terraform の責務
+（`infra/cloud_run.tf` の `allUsers` への `roles/run.invoker`）。同じ理由で
+`roles/iam.serviceAccountUser` はプロジェクトではなく `go-todo-run` SA に対して張る。
+
+**設定の反映には最大 5 分かかる。** apply 直後の 1 回目が権限エラーで落ちても、
+すぐに設定を疑わない。
+
 ---
 
 ## 10. テスト戦略
