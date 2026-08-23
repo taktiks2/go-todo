@@ -24,6 +24,23 @@ resource "google_artifact_registry_repository" "app" {
     }
   }
 
+  # delete-old は tagState: ANY で解決される（gcloud artifacts repositories
+  # describe で実測済み）ため、タグ付きイメージも消える対象に入る。
+  # cloud_run.tf は :bootstrap を作成時点の image として直書きしており、
+  # keep-recent の直近 5 世代からこぼれ落ちて 30 日を過ぎると delete-old に
+  # 消される。消えた状態でサービスを再作成する apply（name/location の変更、
+  # destroy → apply、state 消失後の再構築）を走らせると「Image ... not found」
+  # で落ちるため、:bootstrap タグだけは無条件に守る。
+  cleanup_policies {
+    id     = "keep-bootstrap"
+    action = "KEEP"
+
+    condition {
+      tag_state    = "TAGGED"
+      tag_prefixes = ["bootstrap"]
+    }
+  }
+
   # tag_state を UNTAGGED にしない。#7 の CD は git SHA でタグを打つので
   # 全イメージが TAGGED になり、UNTAGGED 条件では 1 つも消えない。
   #

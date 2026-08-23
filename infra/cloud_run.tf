@@ -33,6 +33,10 @@ resource "google_cloud_run_v2_service" "api" {
     containers {
       # 下の ignore_changes があるので、この値が使われるのは初回作成時だけ。
       # 実物は just docker-push が :bootstrap として先に置いてある。
+      #
+      # :bootstrap タグが 30 日を過ぎても消えないのは artifact_registry.tf の
+      # keep-bootstrap policy のおかげ。サービスを再作成する apply はこの
+      # image を再度 pull するため、タグが消えていれば「Image ... not found」で失敗する。
       image = "${var.region}-docker.pkg.dev/${var.project_id}/${var.repository_id}/api:bootstrap"
     }
 

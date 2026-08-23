@@ -36,7 +36,10 @@ serviceAccountKey.json
 # Terraform
 # .terraform.lock.hcl は除外しない。コミットして provider のハッシュを固定する。
 # *.tfvars は「作らない」方針を破ったときの保険（docs/DESIGN.md §9）。
+# *.tfvars.json も同じ保険。*.tfvars だけでは terraform.tfvars.json や
+# *.auto.tfvars.json を拾えない。
 .terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfvars.json

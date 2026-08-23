@@ -1,5 +1,8 @@
 # 箱だけ作る。値（version）は Phase 2 で gcloud から入れる。
 # tfvars にも state にも平文を置かないため（docs/DESIGN.md §9）。
+# 今は箱が空なので lifecycle は付けない。Phase 2 で実値の version が入ったら、
+# lifecycle { prevent_destroy = true } を検討する価値がある――今のままだと
+# terraform destroy がこの secret とその version を道連れにする。
 resource "google_secret_manager_secret" "database_url" {
   secret_id = "database-url"
 

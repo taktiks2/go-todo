@@ -146,6 +146,16 @@ docker-push tag="bootstrap": docker-build
 tf-init:
     terraform init
 
+# フォーマットを揃える
+[working-directory('infra')]
+tf-fmt:
+    terraform fmt -recursive
+
+# 構文と設定の妥当性を検証する
+[working-directory('infra')]
+tf-validate:
+    terraform validate
+
 # 差分を確認する
 [working-directory('infra')]
 tf-plan:
