@@ -5,6 +5,17 @@
 - 関連: `docs/DESIGN.md` §9 インフラ（Cloud Run 設定 / 設定とシークレット / IaC: Terraform）、§14 リスク
 - 前提: #1（GCP プロジェクトと state バケット）、#4（Dockerfile）
 
+> **注記（実装後に追記）:** この spec は着手時点の設計である。実装と検証でいくつかの
+> 判断と前提が覆った。**確定した形は `infra/` / `backend/internal/http/router.go` /
+> `docs/DESIGN.md` §9・§14 を見ること。** 以下は初版のまま残してある。
+>
+> | 初版の記述 | 実際 |
+> |---|---|
+> | ヘルスチェックのパスは `/healthz`（検証コマンドの `curl` も含む） | **`/api/healthz` に移した。** `*.run.app` では Google Frontend が `/healthz` だけを横取りし、Cloud Run に届く前に HTML 404 を返す（リクエストログにも一切現れない）。根拠と検証の全量は `docs/DESIGN.md` §14 |
+> | 決定事項の TDD 行:「適用外」「テストで守れる振る舞いが無い」 | **Go のコードにも触れた。** `/healthz` → `/api/healthz` の移動は `backend/internal/http/router.go` と `handler_test.go` の変更を伴った。`CONTRIBUTING.md` §1 は `mode:ai-only` issue（#5 はこのラベルを持つ）に限り Claude が Go の実装コードを直接編集することを許しており、その例外の範囲内。TDD 自体は省略していない――先に失敗するテストを書いて RED を確認し、実装して GREEN にした（`CONTRIBUTING.md` §2） |
+> | provider 最新は `7.44.0` | コミットした `infra/.terraform.lock.hcl` が固定したのは **`7.45.0`**（`~> 7.0` の範囲内） |
+> | `cleanup_policy_dry_run` は `true` で始めて後から `false` にする | **最初から `false` で始めた。** 理由は下の `infra/artifact_registry.tf` のコード例のコメントどおり（AR は作成時点でイメージ 0 個で、有効にしても消える対象が無い） |
+
 ## 目的
 
 `infra/` に Terraform を書き、#1 で作った GCS バケットを backend にして
@@ -388,7 +399,7 @@ gcloud run services describe go-todo-api --region asia-northeast1 \
   --format='value(status.url, spec.template.spec.serviceAccountName, spec.template.metadata.annotations["autoscaling.knative.dev/maxScale"])'
 
 # 公開 URL が実際に JSON を返す
-curl -s "$(terraform -chdir=infra output -raw service_url)/healthz" | jq
+curl -s "$(terraform -chdir=infra output -raw service_url)/api/healthz" | jq
 ```
 
 期待する結果:

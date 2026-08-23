@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **注記（実装後に追記）:** この計画書は実行時の記録であり、本文は書き換えていない。
+> 確定した最終形は `docs/DESIGN.md` §9・§14 と `infra/` を見ること。以下の本文が
+> `/healthz` と書いている箇所は、実際に配備されたコードでは `/api/healthz` を指す。
+
 **Goal:** `infra/` に Terraform を書き、GCS backend で state を管理しながら Artifact Registry・Cloud Run・Secret Manager の箱を作り、公開 URL が `/healthz` の JSON を返すところまで通す。
 
 **Architecture:** リソースは 6 個。モジュール化しない。Cloud Run は実在するイメージを要求するが Artifact Registry はこの issue で初めて作るため、`-target` で AR だけ先に apply → イメージを push → 残りを apply という 2 段階の bootstrap を踏む。イメージのバージョン管理は Terraform の責務ではないので、`image` と `client` / `client_version` は `lifecycle.ignore_changes` で CD（#7）に譲る。
