@@ -27,3 +27,24 @@ variable "service_name" {
   type        = string
   default     = "go-todo-api"
 }
+
+variable "github_repository" {
+  description = "WIF が借用を許可する GitHub リポジトリ（owner/repo）"
+  type        = string
+  default     = "taktiks2/go-todo"
+}
+
+# 数値 ID を .tf に直書きすると意味が読めなくなるので変数に名前を付ける。
+# 取得: gh api users/taktiks2 -q .id
+variable "github_owner_id" {
+  description = "GitHub オーナーの数値 ID。名前の再利用による成りすましを防ぐために使う"
+  type        = string
+  default     = "37180466"
+}
+
+# 取得: gh api repos/taktiks2/go-todo -q .id
+variable "github_repository_id" {
+  description = "GitHub リポジトリの数値 ID"
+  type        = string
+  default     = "1332914759"
+}
